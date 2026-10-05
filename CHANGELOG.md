@@ -1,3 +1,11 @@
+## [Unreleased]
+
+### Added
+
+- Bengali EPUBs now render correctly with a Bengali SD-card font: conjuncts, reph, and vowel signs are shaped from a cluster table that the font builder pre-computes with HarfBuzz (`--intervals bengali`), and Bengali book titles use the selected SD-card font in the UI.
+- Bengali rendering now matches desktop shaping for the contextual vowel-sign forms: word-initial ে/ৈ, word-final া/ী/ৗ, ি and ী sized to wide conjuncts or fused with a reph (টি, ষ্টি, র্তি, র্তী), below signs and the candrabindu attached to the consonant before a ya-phala, and ৰ (U+09F0) treated as র inside conjuncts. Rebuild Bengali fonts with the updated converter to get the new forms; older fonts keep working as before.
+- UI text in a script the built-in fonts lack (Indic scripts, CJK) is drawn with any installed SD-card font that covers it, loaded on demand and independent of the reader font. Book names in the library stay readable after sleep, restart, or a cache clear, and a book whose title needs such a script is opened with a covering font even when the global font cannot draw it.
+
 ## [v1.6.0] - 2026-09-21
 
 ### Added

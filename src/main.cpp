@@ -85,6 +85,7 @@ inline esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause() { return ESP_SLEEP_
 #include "KOReaderCredentialStore.h"
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
+#include "ProductVersion.h"
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
@@ -1359,7 +1360,7 @@ void setup() {
             (BoardConfig::isX4Pro() || CROSSINK_APP_DEVICE_X4CLASSIC) ? "DOWN" : "UP");
   }
 
-  LOG_DBG("MAIN", "Starting CrossInk version " CROSSINK_VERSION);
+  LOG_DBG("MAIN", "Starting " CROSSINDIX_LABEL);
   logMemoryStats("Boot");
 
   // Resolve the single boot-presentation decision. Skipping the splash also
