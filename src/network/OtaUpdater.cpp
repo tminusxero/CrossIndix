@@ -24,102 +24,34 @@ OtaUpdater::OtaUpdaterError OtaUpdater::installUpdate(ProgressCallback, void*, s
 #include "esp_ota_ops.h"
 #include "mbedtls/sha256.h"
 #include "network/HttpDownloader.h"
+#include "network/OtaVersion.h"
 #include "network/WifiPowerSaveGuard.h"
 
 namespace {
+// CrossIndix releases: tminusxero/CrossIndix, assets crossindix-<version>-<device>.bin,
+// compared against the CrossIndix version (CROSSINDIX_VERSION from platformio.ini
+// [crossindix]); CrossInk's own releases are never offered over this firmware.
 #ifndef CROSSINK_OTA_RELEASE_URL
-#define CROSSINK_OTA_RELEASE_URL "https://api.github.com/repos/uxjulia/CrossInk/releases/latest"
+#define CROSSINK_OTA_RELEASE_URL "https://api.github.com/repos/tminusxero/CrossIndix/releases/latest"
 #endif
 
 constexpr char latestReleaseUrl[] = CROSSINK_OTA_RELEASE_URL;
 
 #ifdef CROSSINK_FIRMWARE_DEVICE_TYPE
-constexpr char firmwareAssetStem[] = "firmware-" CROSSINK_FIRMWARE_DEVICE_TYPE;
-constexpr char firmwareAssetName[] = "firmware-" CROSSINK_FIRMWARE_DEVICE_TYPE ".bin";
+constexpr char firmwareDeviceType[] = CROSSINK_FIRMWARE_DEVICE_TYPE;
 #else
-constexpr char firmwareAssetStem[] = "firmware";
-constexpr char firmwareAssetName[] = "firmware.bin";
+constexpr char firmwareDeviceType[] = "";
 #endif
 
-constexpr char binSuffix[] = ".bin";
-constexpr size_t VERSION_SEGMENT_COUNT = 4;
+#ifdef CROSSINDIX_VERSION
+constexpr char currentProductVersion[] = CROSSINDIX_VERSION;
+#else
+constexpr char currentProductVersion[] = CROSSINK_VERSION;
+#endif
 constexpr size_t OTA_PROGRESS_UPDATE_BYTES = 64 * 1024;
 constexpr size_t OTA_HASH_CHUNK = 4096;
 constexpr char OTA_STAGE_DIR[] = "/.crosspoint";
 constexpr char OTA_STAGE_PATH[] = "/.crosspoint/ota-update.bin";
-
-struct ParsedVersion {
-  int segments[VERSION_SEGMENT_COUNT] = {0, 0, 0, 0};
-  bool valid = false;
-  bool releaseCandidate = false;
-};
-
-bool isDigit(const char c) { return c >= '0' && c <= '9'; }
-
-bool startsWithNumberAfterOptionalV(const char* version) {
-  if (version == nullptr) return false;
-  if ((version[0] == 'v' || version[0] == 'V') && isDigit(version[1])) return true;
-  return isDigit(version[0]);
-}
-
-bool containsRcMarker(const char* version) {
-  if (version == nullptr) return false;
-  for (const char* p = version; p[0] != '\0' && p[1] != '\0' && p[2] != '\0'; ++p) {
-    if (p[0] == '-' && (p[1] == 'r' || p[1] == 'R') && (p[2] == 'c' || p[2] == 'C')) {
-      return true;
-    }
-  }
-  return false;
-}
-
-ParsedVersion parseVersion(const char* version) {
-  ParsedVersion parsed;
-  if (!startsWithNumberAfterOptionalV(version)) return parsed;
-
-  const char* p = version;
-  if (p[0] == 'v' || p[0] == 'V') ++p;
-
-  size_t segmentIndex = 0;
-  while (segmentIndex < VERSION_SEGMENT_COUNT) {
-    if (!isDigit(*p)) return parsed;
-
-    int value = 0;
-    while (isDigit(*p)) {
-      value = value * 10 + (*p - '0');
-      ++p;
-    }
-    parsed.segments[segmentIndex] = value;
-    ++segmentIndex;
-
-    if (*p != '.') break;
-    ++p;
-  }
-
-  parsed.valid = true;
-  parsed.releaseCandidate = containsRcMarker(version);
-  return parsed;
-}
-
-int compareVersions(const char* latestVersion, const char* currentVersion) {
-  const ParsedVersion latest = parseVersion(latestVersion);
-  const ParsedVersion current = parseVersion(currentVersion);
-  if (!latest.valid || !current.valid) return 0;
-
-  for (size_t i = 0; i < VERSION_SEGMENT_COUNT; ++i) {
-    if (latest.segments[i] != current.segments[i]) {
-      return latest.segments[i] > current.segments[i] ? 1 : -1;
-    }
-  }
-
-  if (current.releaseCandidate && !latest.releaseCandidate) return 1;
-  return 0;
-}
-
-bool startsWith(const char* value, const char* prefix) {
-  if (value == nullptr || prefix == nullptr) return false;
-  const size_t prefixLength = strlen(prefix);
-  return strncmp(value, prefix, prefixLength) == 0;
-}
 
 char lowerHex(const uint8_t value) {
   return value < 10 ? static_cast<char>('0' + value) : static_cast<char>('a' + value - 10);
@@ -150,20 +82,8 @@ bool sha256Matches(const uint8_t digest[32], const char* expectedHex) {
 
 bool isHttpUrl(const std::string& url) { return url.rfind("http://", 0) == 0; }
 
-bool endsWith(const char* value, const char* suffix) {
-  if (value == nullptr || suffix == nullptr) return false;
-  const size_t valueLength = strlen(value);
-  const size_t suffixLength = strlen(suffix);
-  if (suffixLength > valueLength) return false;
-  return strcmp(value + valueLength - suffixLength, suffix) == 0;
-}
-
 bool isMatchingFirmwareAssetName(const char* assetName) {
-  if (assetName == nullptr) return false;
-  if (strcmp(assetName, firmwareAssetName) == 0) return true;
-  if (!startsWith(assetName, firmwareAssetStem)) return false;
-  if (assetName[strlen(firmwareAssetStem)] != '-') return false;
-  return endsWith(assetName, binSuffix);
+  return OtaVersion::isFirmwareAssetFor(assetName, firmwareDeviceType);
 }
 
 /*
@@ -299,7 +219,7 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   };
 
   totalBytesReceived = 0;
-  LOG_DBG("OTA", "Checking for update (current: %s)", CROSSINK_VERSION);
+  LOG_DBG("OTA", "Checking for update (current: %s)", currentProductVersion);
 
   esp_http_client_handle_t client_handle = esp_http_client_init(&client_config);
   if (!client_handle) {
@@ -307,7 +227,7 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
     return INTERNAL_UPDATE_ERROR;
   }
 
-  esp_err = esp_http_client_set_header(client_handle, "User-Agent", "CrossInk-ESP32-" CROSSINK_VERSION);
+  esp_err = esp_http_client_set_header(client_handle, "User-Agent", "CrossIndix-ESP32-" CROSSINK_VERSION);
   if (esp_err != ESP_OK) {
     LOG_ERR("OTA", "esp_http_client_set_header Failed : %s", esp_err_to_name(esp_err));
     esp_http_client_cleanup(client_handle);
@@ -339,7 +259,7 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
   latestVersion = releaseParser.getTagName();
 
   if (!releaseParser.foundFirmware()) {
-    LOG_ERR("OTA", "No matching %s asset found for release %s", firmwareAssetStem, latestVersion.c_str());
+    LOG_ERR("OTA", "No crossindix-*-%s.bin asset found for release %s", firmwareDeviceType, latestVersion.c_str());
     return NO_UPDATE;
   }
 
@@ -356,12 +276,10 @@ OtaUpdater::OtaUpdaterError OtaUpdater::checkForUpdate() {
 }
 
 bool OtaUpdater::isUpdateNewer() const {
-  if (!updateAvailable || latestVersion.empty() || latestVersion == CROSSINK_VERSION) {
-    return false;
-  }
+  if (!updateAvailable || latestVersion.empty()) return false;
 
-  const int comparison = compareVersions(latestVersion.c_str(), CROSSINK_VERSION);
-  LOG_DBG("OTA", "Version comparison latest=%s current=%s result=%d", latestVersion.c_str(), CROSSINK_VERSION,
+  const int comparison = OtaVersion::compare(latestVersion.c_str(), currentProductVersion);
+  LOG_DBG("OTA", "Version comparison latest=%s current=%s result=%d", latestVersion.c_str(), currentProductVersion,
           comparison);
   return comparison > 0;
 }

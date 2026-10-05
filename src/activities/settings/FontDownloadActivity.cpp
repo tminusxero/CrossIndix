@@ -849,6 +849,12 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
     HttpDownloader::DownloadOptions downloadOptions;
     downloadOptions.preservePartial = true;
     downloadOptions.resumePartial = true;
+#if defined(FREEINK_NET_WOLFSSL)
+    // Font files come from GitHub release assets over HTTPS. The wolfSSL transport
+    // streams large HTTPS bodies on the ESP32-C3 where esp_http_client stalls; the
+    // manifest (fetched with the verified client) pins each file's size and CRC32.
+    if (url.rfind("https://", 0) == 0) downloadOptions.transport = HttpDownloader::Transport::WOLFSSL;
+#endif
     // Poll Back and the touch Cancel controls from shouldCancel, which
     // HttpDownloader checks at the top of every read-loop iteration. The
     // progress callback is throttled to every 64KB / 250ms, so polling input

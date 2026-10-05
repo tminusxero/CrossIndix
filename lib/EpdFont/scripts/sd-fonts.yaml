@@ -521,6 +521,15 @@ families:
           variable: { wdth: 100, wght: 700 },
         }
 
+  - name: TiroDevanagariSanskrit
+    description: "Tiro Devanagari Sanskrit"
+    languages: "Sanskrit, Hindi, Marathi, Nepali, Latin"
+    intervals: devanagari,latin-ext
+    sizes: [8, 9, 10, 12, 14, 16, 18, 20]
+    styles:
+      regular:
+        { url: "https://raw.githubusercontent.com/google/fonts/main/ofl/tirodevanagarisanskrit/TiroDevanagariSanskrit-Regular.ttf" }
+
   - name: NotoSansDevanagari
     description: "Noto Sans Devanagari"
     languages: "Hindi, Marathi, Nepali, Sanskrit, Latin"

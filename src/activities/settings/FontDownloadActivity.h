@@ -23,15 +23,15 @@ struct Rect;
 #define FONTS_MANIFEST_VERSION 1
 
 #ifndef FONT_MANIFEST_URL
-// Default hosted SD-font manifest. Use plain HTTP for this public S3 bucket:
-// HTTPS stalls inside esp_http_client on ESP32-C3, and downloaded .cpfont files
-// are still validated by CRC before install. The versioned prefix must stay in
-// sync with .github/workflows/release-fonts.yml and cpfont_version.py.
-#define FONT_MANIFEST_URL_STRINGIFY_INNER(x) #x
-#define FONT_MANIFEST_URL_STRINGIFY(x) FONT_MANIFEST_URL_STRINGIFY_INNER(x)
-#define FONT_MANIFEST_URL                                                                    \
-  "http://crossink-fonts.s3.us-east-1.amazonaws.com/sd-fonts-m" FONT_MANIFEST_URL_STRINGIFY( \
-      FONTS_MANIFEST_VERSION) "-b" FONT_MANIFEST_URL_STRINGIFY(CPFONT_VERSION) "/fonts.json"
+// CrossIndix font manifest: the rolling "fonts" release of tminusxero/CrossIndix,
+// which .github/workflows/release-fonts.yml refreshes with every font release
+// (fonts.json plus the individual .cpfont files it lists). The manifest is small
+// and fetched through the certificate-verified esp_http_client; the font files
+// use the wolfSSL transport on hardware (see FontDownloadActivity.cpp), as the
+// firmware updater does for its downloads, because large HTTPS transfers stall
+// in esp_http_client on the ESP32-C3. Files are CRC-checked against the manifest
+// before install.
+#define FONT_MANIFEST_URL "https://github.com/tminusxero/CrossIndix/releases/download/fonts/fonts.json"
 #endif
 
 class FontDownloadActivity : public Activity {
