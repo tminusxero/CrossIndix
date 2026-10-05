@@ -1,4 +1,3 @@
-#include "ProductVersion.h"
 #include "OtaUpdateActivity.h"
 
 #include <GfxRenderer.h>
@@ -7,6 +6,7 @@
 
 #include "AppVersion.h"
 #include "MappedInputManager.h"
+#include "ProductVersion.h"
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
@@ -57,15 +57,6 @@ void OtaUpdateActivity::onWifiSelectionComplete(const bool success) {
     requestUpdate(true);
     return;
   }
-
-  // CrossIndix has no OTA release channel: CrossInk's releases would be offered
-  // as "updates" over this firmware, so the check ends as up to date.
-  {
-    RenderLock lock(*this);
-    state = NO_UPDATE;
-  }
-  requestUpdate(true);
-  return;
 
   const auto res = updater.checkForUpdate();
   if (res != OtaUpdater::OK) {
