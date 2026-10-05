@@ -185,8 +185,18 @@ def inject_version(env):
     env.Append(CPPDEFINES=[
         ('CROSSINK_GIT_SHA', f'\\"{get_git_short_sha(project_dir)}\\"'),
         ('CROSSINK_GIT_DIRTY', f'\\"{get_git_dirty(project_dir)}\\"'),
-        ('CROSSINDIX_BUILD_ID', f'\\"{get_crossindix_build_id(project_dir)}\\"'),
     ])
+
+    # Release builds (CROSSINDIX_RELEASE=1, set by the release workflow) carry no
+    # commit in the label: the version names the build, as in CrossInk's own
+    # releases. Every other build keeps "+<commit>" ("-dirty" when the tree had
+    # uncommitted changes) so a hand-flashed build can be identified.
+    release_build = os.environ.get('CROSSINDIX_RELEASE', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+    build_suffix = ''
+    if not release_build:
+        build_id = get_crossindix_build_id(project_dir)
+        env.Append(CPPDEFINES=[('CROSSINDIX_BUILD_ID', f'\\"{build_id}\\"')])
+        build_suffix = f'+{build_id}'
 
     # CrossIndix label pieces for every environment, simulator and test builds
     # included, so what a simulator screenshot shows is what the device shows.
@@ -197,7 +207,7 @@ def inject_version(env):
         ('CROSSINK_BASE_VERSION', f'\\"{get_crossink_version(project_dir)}\\"'),
     ])
     print(f'CrossIndix label: CrossIndix-{get_crossindix_version(project_dir)}'
-          f'+{get_crossindix_build_id(project_dir)} (CrossInk {get_crossink_version(project_dir)})')
+          f'{build_suffix} (CrossInk {get_crossink_version(project_dir)})')
 
     if pioenv in {'default', 'sticky', 'x4-pro', 'x4-classic'}:
         version_string = get_hardware_version(project_dir, pioenv)

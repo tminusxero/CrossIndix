@@ -1,17 +1,19 @@
-name: CI (build)
+name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
 
-# A newer commit supersedes older PR validation; keep main pushes independent.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
+
+env:
+  PIO_CORE_URL: https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
 
 jobs:
   clang-format:
@@ -20,23 +22,17 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.14"
-
       - name: Install clang-format-21
         run: |
-          wget https://apt.llvm.org/llvm.sh
+          wget -q https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           sudo ./llvm.sh 21
           sudo apt-get update
           sudo apt-get install -y clang-format-21
-
-      - name: Run clang-format
+      - name: Check formatting
         run: |
           PATH="/usr/lib/llvm-21/bin:$PATH" ./bin/clang-format-fix
-          git diff --exit-code || (echo "Please run 'bin/clang-format-fix' to fix formatting issues" && exit 1)
+          git diff --exit-code || (echo "Run bin/clang-format-fix" && exit 1)
 
   cppcheck:
     runs-on: ubuntu-latest
@@ -44,97 +40,110 @@ jobs:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
-
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
           enable-cache: true
-
       - name: Cache PlatformIO packages
         uses: actions/cache@v4
         with:
-          # Do not cache PlatformIO's Python virtual environment. It is tied to
-          # the runner's Python and can become invalid when restored elsewhere.
           path: |
             ~/.platformio/packages
             ~/.platformio/platforms
           key: ${{ runner.os }}-platformio-py3.14-core6.1.19-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
-
       - name: Install PlatformIO Core
-        run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
-
+        run: uv pip install --system -U "$PIO_CORE_URL"
       - name: Run cppcheck
         run: pio check --fail-on-defect low --fail-on-defect medium --fail-on-defect high
 
-  build:
-    # Firmware artifacts are validated on pull requests; release builds stay
-    # in the dedicated release workflow.
-    if: github.event_name == 'pull_request'
+  host-tests:
+    # Host unit tests of CrossIndix plus Lipi's own suite (lipi/test via add_subdirectory).
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        environment: [default, x4-pro]
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
+      - name: Configure and build
+        run: |
+          cmake -S test -B build/test
+          # GNU make: -k keeps building the other targets when one fails.
+          cmake --build build/test -j4 -- -k || true
+      - name: Only the known GCC 13 casualties may be unbuilt
+        # Three upstream tests do not compile under GCC 13 (parallel STL headers); anything
+        # else failing to build is a regression.
+        run: |
+          ctest --test-dir build/test -N | grep -o '[A-Za-z0-9_]*_NOT_BUILT' | sort -u > not_built.txt || true
+          cat not_built.txt
+          printf '%s\n' EpubTextGrayscaleTest_NOT_BUILT PersistableStoreAtomicTest_NOT_BUILT SectionPersistenceTest_NOT_BUILT > allowed.txt
+          if [ -n "$(comm -23 not_built.txt allowed.txt)" ]; then echo "::error::unexpected unbuilt tests"; comm -23 not_built.txt allowed.txt; exit 1; fi
+      - name: Run tests
+        run: ctest --test-dir build/test -j4 --output-on-failure -E '_NOT_BUILT$'
 
+  python-tests:
+    # Lipi builder goldens and the converter test, on the pinned Google Fonts sources.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: "Install font tools (pinned: the goldens depend on the HarfBuzz and FreeType builds)"
+        run: pip install uharfbuzz==0.56.1 fonttools==4.25.0 freetype-py==2.5.1 pyyaml==6.0.1 pillow==10.0.1 pytest==7.4.0
+      - name: Fetch source fonts
+        run: python3 scripts/fetch-indic-fonts.py --lock scripts/indic-fonts.lock --out fonts
+      - name: Lipi builder tests
+        run: LIPI_FONT_DIR="$PWD/fonts" python3 -m pytest -q lipi/builder/test_shaping.py
+      - name: Converter tests
+        run: LIPI_FONT_DIR="$PWD/fonts" python3 -m pytest -q lib/EpdFont/scripts/test_fontconvert_lipi.py
+
+  firmware:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [default, x4-pro, x4-classic]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
           enable-cache: true
-
       - name: Cache PlatformIO packages
         uses: actions/cache@v4
         with:
-          # Do not cache PlatformIO's Python virtual environment. It is tied to
-          # the runner's Python and can become invalid when restored elsewhere.
           path: |
             ~/.platformio/packages
             ~/.platformio/platforms
           key: ${{ runner.os }}-platformio-py3.14-core6.1.19-${{ matrix.environment }}-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
-
       - name: Install PlatformIO Core
-        run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
-
-      - name: Build ${{ matrix.environment }} firmware
+        run: uv pip install --system -U "$PIO_CORE_URL"
+      - name: Build ${{ matrix.environment }}
         run: |
           set -euo pipefail
           pio run -j1 -e ${{ matrix.environment }} | tee pio-${{ matrix.environment }}.log
-
-      - name: Extract firmware stats
+      - name: Build stats
         run: |
-          set -euo pipefail
           {
-            echo "## ${{ matrix.environment }} firmware build stats"
-            grep -E "RAM:\s|Flash:\s" pio-${{ matrix.environment }}.log | while read -r line; do echo "- ${line}"; done
+            echo "## ${{ matrix.environment }}"
+            grep -E "CrossIndix label|RAM:\s|Flash:\s" pio-${{ matrix.environment }}.log | while read -r line; do echo "- ${line}"; done
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # This job is used as the PR required actions check, allows for changes to other steps in the future without breaking
-  # PR requirements.
-  test-status:
-    name: Test Status
-    needs:
-      - build
-      - clang-format
-      - cppcheck
+  status:
+    name: CI status
+    needs: [clang-format, cppcheck, host-tests, python-tests, firmware]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Fail because needed jobs failed
-        # Fail if any job failed or was cancelled (skipped jobs are ok)
-        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+      - if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
         run: exit 1
-      - name: Success
-        run: exit 0
+      - run: exit 0

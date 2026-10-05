@@ -2,9 +2,11 @@
 
 /// The product label shown to the user: "CrossIndix-<version>+<commit> (CrossInk <version>)".
 /// Hardware builds get the pieces from scripts/git_branch.py; simulator and test builds fall
-/// back to the CrossInk version they define directly. The commit (CROSSINDIX_BUILD_ID, with
-/// "-dirty" when the build tree had uncommitted changes) says which build is on the device:
-/// boot screen, settings footer, OTA screen, sleep screen of debug builds, and the boot log.
+/// back to the CrossInk version they define directly. Non-release builds add the commit
+/// (CROSSINDIX_BUILD_ID, with "-dirty" when the build tree had uncommitted changes) so a
+/// hand-flashed build can be told apart on the boot screen, settings footer, OTA screen, sleep
+/// screen of debug builds, and in the boot log; release builds (CROSSINDIX_RELEASE=1 at build
+/// time) show the version alone.
 #ifdef CROSSINDIX_BUILD_ID
 #define CROSSINDIX_BUILD_SUFFIX "+" CROSSINDIX_BUILD_ID
 #else

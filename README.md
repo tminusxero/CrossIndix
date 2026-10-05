@@ -20,8 +20,8 @@ Languages covered: Bangla and Assamese (Bengali script); Hindi, Marathi, Nepali 
 ## Install in four steps
 
 1. **Install the firmware.** Download the file for your device from the Releases page:
-   `crossindix-<version>-x4-pro.bin` for the X4 Pro, `crossindix-<version>-x3-x4.bin` for the X3
-   and X4. Then follow the flashing
+   `crossindix-<version>-x4-pro.bin` for the X4 Pro, `crossindix-<version>-x4-classic.bin` for the
+   X4 Classic, `crossindix-<version>-x3-x4.bin` for the X3 and X4. Then follow the flashing
    guide in [docs/installation.md](docs/installation.md). Your books and settings on the SD
    card are not touched.
 
