@@ -33,7 +33,9 @@ class ChapterHtmlSlimParserTest : public ::testing::TestWithParam<const char*> {
   ChapterHtmlSlimParser parser{epub,  filepath, renderer, 0,  1.0f, false, false, 0, 480, 800,     false,
                                false, false,    0,        {}, true, "",    "",    0, {},  nullptr, &cssParser};
   std::array<ChapterHtmlSlimParser::StyleStackEntry, 4> inlineStyles{};
-  std::array<BlockStyle, 4> blockStyles{};
+  // The parser allocates MAX_BLOCK_STYLE_DEPTH entries itself; a smaller buffer here is overrun by
+  // nested blocks (ol > li > ol > li wrote past a 4-entry array into the fixture).
+  std::array<BlockStyle, ChapterHtmlSlimParser::MAX_BLOCK_STYLE_DEPTH> blockStyles{};
 
   void SetUp() override {
     parser.currentTextBlock = std::make_unique<ParsedText>(false);
@@ -67,6 +69,56 @@ TEST_P(ChapterHtmlSlimParserTest, KeepsCssVerticalAlignAndInternalLinkMetadata) 
       static_cast<uint8_t>((parser.currentTextBlock->wordBackgroundBlack.front() & TextBlock::WORD_FLAG_LINK_ID_MASK) >>
                            TextBlock::WORD_FLAG_LINK_ID_SHIFT);
   EXPECT_EQ(wordLinkId, footnote.linkId);
+}
+
+class ChapterHtmlSlimParserWordTest : public ::testing::Test {
+ protected:
+  std::string filepath = "unused.xhtml";
+  Epub epub;
+  GfxRenderer renderer;
+  CssParser cssParser{"/tmp"};
+  ChapterHtmlSlimParser parser{epub,  filepath, renderer, 0,  1.0f, false, false, 0, 480, 800,     false,
+                               false, false,    0,        {}, true, "",    "",    0, {},  nullptr, &cssParser};
+  std::array<ChapterHtmlSlimParser::StyleStackEntry, 4> inlineStyles{};
+  // The parser allocates MAX_BLOCK_STYLE_DEPTH entries itself; a smaller buffer here is overrun by
+  // nested blocks (ol > li > ol > li wrote past a 4-entry array into the fixture).
+  std::array<BlockStyle, ChapterHtmlSlimParser::MAX_BLOCK_STYLE_DEPTH> blockStyles{};
+
+  void SetUp() override {
+    parser.currentTextBlock = std::make_unique<ParsedText>(false);
+    parser.inlineStyleBuf_ = inlineStyles.data();
+    parser.blockStyleBuf_ = blockStyles.data();
+    parser.blockStyleCount_ = 1;
+  }
+};
+
+// expat delivers character data per 1 KB parse buffer, so a word can straddle two
+// callbacks. In a paragraph at the text-run layout limit the partial word used to be
+// flushed at the callback end, splitting भक्तोंको into "भक्तोंक" and "ो" with a
+// word gap between them. The partial word must stay buffered until whitespace ends it.
+TEST_F(ChapterHtmlSlimParserWordTest, WordStraddlingTwoCallbacksStaysOneToken) {
+  const std::string first =
+      "\xe0\xa4\xb8\xe0\xa5\x8c\xe0\xa4\xad\xe0\xa4\xbe\xe0\xa4\x97\xe0\xa5\x8d\xe0\xa4\xaf"
+      "\xe0\xa4\xb6\xe0\xa4\xbe\xe0\xa4\xb2\xe0\xa5\x80 "                                      // सौभाग्यशाली
+      "\xe0\xa4\xad\xe0\xa4\x95\xe0\xa5\x8d\xe0\xa4\xa4\xe0\xa5\x8b\xe0\xa4\x82\xe0\xa4\x95";  // भक्तोंक
+  const std::string second = "\xe0\xa5\x8b";                                                   // ो
+  // The run is at the layout limit once the first complete word is flushed, which is the
+  // state that used to trigger the mid-word flush (the limit is 2048 bytes; सौभाग्यशाली is 33).
+  parser.currentTextRunBytes = 2048 - 33;
+
+  ChapterHtmlSlimParser::characterData(&parser, first.c_str(), static_cast<int>(first.size()));
+  ASSERT_EQ(parser.currentTextBlock->size(), 1u);
+  EXPECT_EQ(std::string(parser.partWordBuffer, parser.partWordBufferIndex),
+            "\xe0\xa4\xad\xe0\xa4\x95\xe0\xa5\x8d\xe0\xa4\xa4\xe0\xa5\x8b\xe0\xa4\x82\xe0\xa4\x95");
+
+  ChapterHtmlSlimParser::characterData(&parser, second.c_str(), static_cast<int>(second.size()));
+  EXPECT_EQ(parser.currentTextBlock->size(), 1u);
+  EXPECT_EQ(std::string(parser.partWordBuffer, parser.partWordBufferIndex),
+            "\xe0\xa4\xad\xe0\xa4\x95\xe0\xa5\x8d\xe0\xa4\xa4\xe0\xa5\x8b\xe0\xa4\x82\xe0\xa4\x95\xe0\xa5\x8b");
+
+  ChapterHtmlSlimParser::characterData(&parser, " ", 1);
+  EXPECT_EQ(parser.currentTextBlock->size(), 2u);
+  EXPECT_EQ(parser.partWordBufferIndex, 0);
 }
 
 INSTANTIATE_TEST_SUITE_P(CssVerticalAlign, ChapterHtmlSlimParserTest,

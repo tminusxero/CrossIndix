@@ -56,3 +56,13 @@ void PageHorizontalRule::render(GfxRenderer&, int, int, int, bool) {}
 bool PageHorizontalRule::serialize(FsFile&) { return false; }
 void PageTableFragment::render(GfxRenderer&, int, int, int, bool) {}
 bool PageTableFragment::serialize(FsFile&) { return false; }
+
+// Link-only stubs for the preview locator and image probing paths, which the
+// parser references but these tests never reach.
+bool PreviewBlockLocator::feed(const char*, int, bool) { return false; }
+
+#include <Epub/converters/ImageDimsProbe.h>
+size_t ImageDimsProbe::write(uint8_t) { return 0; }
+size_t ImageDimsProbe::write(const uint8_t*, size_t) { return 0; }
+bool ImageDimsProbe::getDimensions(ImageDimensions&) const { return false; }
+ImageToFramebufferDecoder* ImageDecoderFactory::getDecoder(const std::string&) { return nullptr; }
