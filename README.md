@@ -1,6 +1,105 @@
+# CrossIndix
+
+Read Bengali and Hindi books on your Xteink.
+
+CrossIndix is reader firmware for the Xteink X3, X4 and X4 Pro. It is
+[CrossInk](https://github.com/uxjulia/CrossInk) with one addition: Bengali and Devanagari text
+renders properly. Conjuncts, vowel signs and marks look the way they do in print, and book
+titles in these scripts show correctly in the library.
+
+Languages covered: Bangla and Assamese (Bengali script); Hindi, Marathi, Nepali and Sanskrit
+(Devanagari script).
+
+## What you need
+
+- An Xteink X3, X4 or X4 Pro.
+- A USB-C cable and a computer, to install the firmware once.
+- Your books as EPUB files. Almost any EPUB bought or downloaded today is fine. Scanned PDFs
+  are not.
+
+## Install in four steps
+
+1. **Install the firmware.** Download the file for your device from the Releases page:
+   `crossindix-<version>-x4-pro.bin` for the X4 Pro, `crossindix-<version>-x3-x4.bin` for the X3
+   and X4. Then follow the flashing
+   guide in [docs/installation.md](docs/installation.md). Your books and settings on the SD
+   card are not touched.
+
+2. **Copy the fonts.** Download the font folder for your script from the same Releases page
+   (`NotoSerifBengali` or `NotoSerifDevanagari`) and copy the whole folder into the `.fonts`
+   folder on the SD card, so it looks like this:
+
+   ```
+   SD card
+   └── .fonts
+       └── NotoSerifDevanagari
+           ├── NotoSerifDevanagari_8.cpfont
+           ├── NotoSerifDevanagari_10.cpfont
+           └── ...
+   ```
+
+   Both folders can be installed side by side. The `.fonts` folder is hidden on some
+   computers; create it if it is not there. On the X4 Pro you can also do this over USB from
+   the device: Home > File Transfer > USB Drive.
+
+3. **Copy your books** onto the SD card as usual.
+
+4. **Choose the font.** On the device go to Settings > Reader > Font Options > Font Family and
+   pick NotoSerifBengali or NotoSerifDevanagari. Open a book and read.
+
+Book titles and file names in Bengali or Devanagari appear correctly in the library as soon
+as the font folder is on the card, whatever font you read with.
+
+## What to expect
+
+- Text matches what a computer or phone would show for more than 99 words in 100 in Bengali
+  novels and Hindi novels. Classical Sanskrit, with its long compound words, is around 95 in
+  100; the rest differ only in the width of a vowel sign before a conjunct.
+- Bengali has been used daily on an X4 Pro. Devanagari has been tested in the emulator and is
+  waiting for its first reader with a device.
+- Page turns are as fast as with any other font.
+
+## If something looks wrong
+
+**Black diamonds instead of letters.** The device draws this symbol for every letter it has no
+font for. On the left is the library with the font folder missing, on the right the same list
+once it is installed.
+
+![The library with and without the font folder](docs/images/indic-fonts-missing.png)
+
+Copy the whole font folder again, including the `_8`, `_10` and `_12` files. Those three sizes
+are what the library, menus and status bar use. Without them, titles show as diamonds even
+though the books themselves open fine.
+
+**Conjuncts split into separate letters with a hasanta**, for example ক ্ ষ instead of ক্ষ. The
+font came from the ordinary CrossInk font store. Only the folders on this project's Releases
+page carry the extra data that joins letters.
+
+**A book in another Indian script** (Tamil, Gujarati, Punjabi, Telugu, Kannada, Malayalam,
+Odia, Sinhala) shows letters but no conjuncts. Those scripts are not supported yet.
+
+## Fonts
+
+The fonts are Noto Serif Bengali and Noto Serif Devanagari by Google, free under the SIL Open
+Font License. Other fonts can be prepared for this firmware; ask in the issues if you have a
+favourite.
+
+## Credits
+
+CrossIndix is built on CrossInk by [uxjulia](https://github.com/uxjulia/CrossInk), which is
+itself based on CrossPoint. It is a separate project and is not part of either. Feedback, and
+reports of books that render badly, are welcome in the issues.
+
+---
+
+Everything below is the README of CrossInk, the firmware CrossIndix is built on, kept as it was
+received. Its instructions apply to CrossIndix too, with the additions above.
+
+# CrossInk
+
 > **This is a personal fork of [CrossPoint Reader](https://github.com/crosspoint-reader/crosspoint-reader)** with a focus on improved fonts and minimal reading stats.
 
-### Supported Devices
+#### Supported Devices
 
 - Xteink X3
 - Xteink X4
@@ -8,7 +107,7 @@
 - Xteink X4 Classic
 - Seeed Studio Sticky
 
-## What's different in this fork
+### What's different in this fork
 
 My goal with this fork was to maintain the core Crosspoint firmware while integrating my preferred typography and some lightweight reading statistics. I’ve focused on keeping the underlying system stable while layering in a few "nice-to-have" features and UI refinements along the way.
 
@@ -25,7 +124,7 @@ My goal with this fork was to maintain the core Crosspoint firmware while integr
   </tr>
 </table>
 
-### Highlights
+#### Highlights
 
 - New reader fonts: Lexend Deca and Bitter.
 - Music notation and selected supplemental Unicode glyph support to be able to render Project Hail Mary accurately.
@@ -55,7 +154,7 @@ My goal with this fork was to maintain the core Crosspoint firmware while integr
 
 ---
 
-### Reader Fonts
+#### Reader Fonts
 
 The default fonts have been replaced with Lexend Deca and Bitter. These fonts have been chosen specifically to improve reading fluency and e-ink performance. These 'sturdier' typefaces feature uniform stroke weights and open geometries, allowing the X4/X3 to render crisp, high-contrast text with font-aliasing on while significantly reducing ghosting and artifacts.
 
@@ -64,13 +163,13 @@ The default fonts have been replaced with Lexend Deca and Bitter. These fonts ha
 
 The UI now uses [Inter](https://fonts.google.com/specimen/Inter) as the display font which has improved readability at smaller sizes.
 
-### Music and Supplemental Glyphs
+#### Music and Supplemental Glyphs
 
 - Built-in reader fonts include music notation, selected Cyrillic glyphs, and the Project Hail Mary CJK fallback ranges. Additional SD-card fonts retain emoji fallback support.
 
 ---
 
-### Font Sizes
+#### Font Sizes
 
 CrossInk includes 10 pt, 12 pt, 14 pt, and 16 pt built-in reader font sizes.
 
@@ -78,11 +177,11 @@ See [SD Card Fonts](./docs/sd-card-fonts.md) for installing additional font fami
 
 ---
 
-### Reader features
+#### Reader features
 
 Reader Options, Focus Reading, Guide Dots, Force Paragraph Indents, reading stats, and finished-book behavior are documented in [Reader Features](./docs/reader-features.md).
 
-### Custom button actions
+#### Custom button actions
 
 CrossInk adds configurable button shortcuts.
 
@@ -90,7 +189,7 @@ See [Controls](./docs/controls.md) for the full action list and defaults.
 
 ---
 
-## Tips for the best reading experience
+### Tips for the best reading experience
 
 CrossInk runs on an ESP32-C3 with limited RAM, so very large folders or complex EPUBs can be slower than they would be on a phone, tablet, or desktop app.
 
@@ -104,7 +203,7 @@ CrossInk runs on an ESP32-C3 with limited RAM, so very large folders or complex 
 
 ---
 
-## Installation
+### Installation
 
 The fastest way to install Crossink is by using Inky, Crossink's web companion app: https://inky.crossink.dev/#flash-tools
 
@@ -114,17 +213,17 @@ See [Installation](./docs/installation.md) for step-by-step flashing and revert 
 
 ---
 
-## Guides & Documentation
+### Guides & Documentation
 
 Visit [https://www.crossink.dev](https://www.crossink.dev) for more user guides and additional documentation.
 
 ---
 
-## Development quick start
+### Development quick start
 
 CrossInk uses PlatformIO for building and flashing firmware. See [Getting Started](./docs/development/getting-started.md) for prerequisites, clone setup, and validation commands.
 
-### Nix/NixOS
+#### Nix/NixOS
 
 Nix/NixOS users can enter the development shell with either `nix develop` (flakes) or `nix-shell`:
 
@@ -142,7 +241,7 @@ services.udev.packages = with pkgs; [ platformio-core.udev ];
 
 After rebuilding the system configuration, reconnect the device or reload udev rules.
 
-### Build / flash / monitor
+#### Build / flash / monitor
 
 Connect your device to your computer via a USB cable. Before the first build, initialize the repository's submodules (including `freeink-sdk`):
 
@@ -162,7 +261,7 @@ See [Testing and Debugging](./docs/development/testing-debugging.md) for serial 
 
 ---
 
-## Notice on Contributions
+### Notice on Contributions
 
 This repository does not accept pull requests. Feature requests may be opened in [discussions](https://github.com/uxjulia/CrossInk/discussions), but major features requiring ongoing support should be directed upstream to [CrossPoint](https://github.com/crosspoint-reader/crosspoint-reader).
 

@@ -1,3 +1,4 @@
+#include "ProductVersion.h"
 #include "OtaUpdateActivity.h"
 
 #include <GfxRenderer.h>
@@ -56,6 +57,15 @@ void OtaUpdateActivity::onWifiSelectionComplete(const bool success) {
     requestUpdate(true);
     return;
   }
+
+  // CrossIndix has no OTA release channel: CrossInk's releases would be offered
+  // as "updates" over this firmware, so the check ends as up to date.
+  {
+    RenderLock lock(*this);
+    state = NO_UPDATE;
+  }
+  requestUpdate(true);
+  return;
 
   const auto res = updater.checkForUpdate();
   if (res != OtaUpdater::OK) {
@@ -152,7 +162,7 @@ void OtaUpdateActivity::render(RenderLock&&) {
   } else if (state == WAITING_CONFIRMATION) {
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_NEW_UPDATE), true, EpdFontFamily::BOLD);
     renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, top + height + metrics.verticalSpacing,
-                      (std::string(tr(STR_CURRENT_VERSION)) + CROSSINK_VERSION).c_str());
+                      (std::string(tr(STR_CURRENT_VERSION)) + CROSSINDIX_LABEL).c_str());
     renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, top + height * 2 + metrics.verticalSpacing * 2,
                       (std::string(tr(STR_NEW_VERSION)) + updater.getLatestVersion()).c_str());
 

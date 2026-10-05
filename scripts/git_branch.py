@@ -160,6 +160,22 @@ def get_hardware_version(project_dir, pioenv):
     return f'{base_version}{device_suffix}'
 
 
+def get_crossindix_version(project_dir):
+    config = configparser.ConfigParser()
+    config.read(os.path.join(project_dir, 'platformio.ini'))
+    return config.get('crossindix', 'version', fallback='0.0.0')
+
+
+def get_crossindix_build_id(project_dir):
+    """Commit the firmware was built from, plus "-dirty" when the tree had
+    uncommitted tracked changes. Shown on the device next to the version and
+    used in the deliverable file names, so a flashed build can be identified."""
+    build_id = get_git_short_sha(project_dir)
+    if get_git_dirty(project_dir) == '1':
+        build_id += '-dirty'
+    return build_id
+
+
 def inject_version(env):
     project_dir = env['PROJECT_DIR']
     pioenv = env['PIOENV']
@@ -169,7 +185,19 @@ def inject_version(env):
     env.Append(CPPDEFINES=[
         ('CROSSINK_GIT_SHA', f'\\"{get_git_short_sha(project_dir)}\\"'),
         ('CROSSINK_GIT_DIRTY', f'\\"{get_git_dirty(project_dir)}\\"'),
+        ('CROSSINDIX_BUILD_ID', f'\\"{get_crossindix_build_id(project_dir)}\\"'),
     ])
+
+    # CrossIndix label pieces for every environment, simulator and test builds
+    # included, so what a simulator screenshot shows is what the device shows.
+    # Separate defines without spaces (a define with spaces does not survive the
+    # command line); src/ProductVersion.h composes the label.
+    env.Append(CPPDEFINES=[
+        ('CROSSINDIX_VERSION', f'\\"{get_crossindix_version(project_dir)}\\"'),
+        ('CROSSINK_BASE_VERSION', f'\\"{get_crossink_version(project_dir)}\\"'),
+    ])
+    print(f'CrossIndix label: CrossIndix-{get_crossindix_version(project_dir)}'
+          f'+{get_crossindix_build_id(project_dir)} (CrossInk {get_crossink_version(project_dir)})')
 
     if pioenv in {'default', 'sticky', 'x4-pro', 'x4-classic'}:
         version_string = get_hardware_version(project_dir, pioenv)
