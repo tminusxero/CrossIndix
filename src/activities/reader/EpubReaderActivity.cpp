@@ -353,8 +353,16 @@ ReaderRenderSpec readerRenderSpecForProfile(const int fontId, const uint16_t vie
   return spec;
 }
 
-void ensureReaderSdFontLoaded(GfxRenderer& renderer) {
+void ensureReaderSdFontLoaded(GfxRenderer& renderer, const char* bookTitle = nullptr) {
   sdFontSystem.ensureLoaded(renderer);
+  // A book whose title is in a script the active font lacks (per-book font
+  // choice lost to a cache clear, or a Latin global font) would render as
+  // replacement glyphs; switch to an installed family covering that script
+  // for this session.
+  sdFontSystem.ensureReaderFontCovers(renderer, bookTitle);
+  // Opening a book: UI families kept for other scripts (library titles) go
+  // before layout, where the C3 heap is tightest.
+  if (bookTitle) sdFontSystem.dropUiFamiliesForBook(renderer);
   // Layout only needs the active font. Release the settings-only family metadata
   // before building a section so it does not consume reader heap headroom.
   sdFontSystem.releaseRegistry();
@@ -2144,7 +2152,7 @@ void EpubReaderActivity::onEnter() {
   }
   loadBookReaderSettings();
   sdFontSystem.setSettingsPersistenceCallback(persistReaderSdFontSettingsForBook, this);
-  ensureReaderSdFontLoaded(renderer);
+  ensureReaderSdFontLoaded(renderer, epub->getTitle().c_str());
   ImageBlock::clearSessionRenderFailures();
   ImageBlock::setExtractor(
       epub.get(),

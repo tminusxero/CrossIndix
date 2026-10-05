@@ -15,6 +15,7 @@
 #include "CrossPointState.h"
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
+#include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
@@ -411,6 +412,9 @@ void ActivityManager::loop() {
       currentActivity = std::move(pendingActivity);
 
       lock.unlock();  // onEnter may acquire its own lock
+      // A network activity suspends lazy UI script fonts in its onEnter;
+      // whatever comes next may use them again.
+      sdFontSystem.resumeUiFallbacks();
       currentActivity->onEnter();
 
       if (pendingAction == PendingAction::None && pendingReaderMenuAction >= 0 &&
@@ -570,6 +574,7 @@ void ActivityManager::replaceActivity(std::unique_ptr<Activity>&& newActivity) {
     // No current activity, safe to launch immediately
     TouchRegistry::getInstance().clear();
     currentActivity = std::move(newActivity);
+    sdFontSystem.resumeUiFallbacks();
     currentActivity->onEnter();
   }
 }
