@@ -146,8 +146,8 @@ class SdCardFont {
     uint8_t kernLeftClassCount = 0;
     uint8_t kernRightClassCount = 0;
     uint8_t ligaturePairCount = 0;
-    uint8_t shapeKind = 0;         // Lipi::SHAPE_KIND_* (0 = none)
-    uint16_t shapeEntryCount = 0;  // cluster table entries (Lipi::entrySizeForKind bytes each)
+    uint8_t shapeKind = 0;         // Lipi::SHAPE_KIND_* (0 = none); Lipi::TOC_KIND_PACKED is set on disk
+    uint16_t shapeEntryCount = 0;  // entries in the packed cluster table (must equal its directory's count)
   };
 
   // All per-style data: file offsets, intervals, kern/lig, prewarm cache, EpdFont
