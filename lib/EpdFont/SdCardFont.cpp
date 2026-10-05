@@ -1,6 +1,7 @@
 #include "SdCardFont.h"
 
 #include <HalStorage.h>
+#include <Lipi.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <PoolBudget.h>
@@ -8,12 +9,17 @@
 
 #include <algorithm>
 #include <climits>
+#include <cstddef>
 #include <cstring>
 #include <memory>
 
 #include "EpdFontFamily.h"
+#include "ShapeTableCache.h"
 
 static_assert(sizeof(EpdGlyph) == 16, "EpdGlyph must be 16 bytes to match .cpfont file layout");
+static_assert(offsetof(EpdGlyph, anchorAbove) == 10 && offsetof(EpdGlyph, anchorBelow) == 11,
+              "EpdGlyph anchors sit in the bytes v4 files left as padding; the v6 third anchor is the top\n"
+              "byte of the 32-bit data offset field (bytes 12-15), zero in v4/v5 files");
 static_assert(sizeof(EpdUnicodeInterval) == 12, "EpdUnicodeInterval must be 12 bytes to match .cpfont file layout");
 static_assert(sizeof(EpdKernClassEntry) == 3, "EpdKernClassEntry must be 3 bytes to match .cpfont file layout");
 static_assert(sizeof(EpdLigaturePair) == 8, "EpdLigaturePair must be 8 bytes to match .cpfont file layout");
@@ -230,6 +236,8 @@ void SdCardFont::freeStyleAll(PerStyle& s) {
   s.bmpIntervals = nullptr;
   s.intervalsAreBmp16 = false;
   freeStyleKernLigatureData(s);
+  ShapeTableCache::release(s.shapeTable);
+  s.shapeTable = nullptr;
   s.present = false;
 }
 
@@ -239,8 +247,9 @@ void SdCardFont::freeAll() {
   clearOverflow();
   clearPersistentCache();
   for (uint8_t i = 0; i < MAX_STYLES; i++) {
-    freeStyleAll(styles_[i]);
+    if (styles_[i].present) freeStyleAll(styles_[i]);
   }
+  styles_.clear();
   styleCount_ = 0;
   contentHash_ = 0;
   loaded_ = false;
@@ -555,6 +564,59 @@ void SdCardFont::computeStyleFileOffsets(PerStyle& s, uint32_t baseOffset) {
   s.bitmapFileOffset = s.ligatureFileOffset + s.header.ligaturePairCount * sizeof(EpdLigaturePair);
 }
 
+// --- Coverage probe (no allocation beyond the stack) ---
+
+uint32_t SdCardFont::probeCoverage(const char* path, const uint32_t* codepoints, const uint8_t count) {
+  if (!path || !codepoints || count == 0 || count > 32) return 0;
+  HalFile file;
+  if (!Storage.openFileForRead("SDCF", path, file)) return 0;
+
+  uint8_t headerBuf[HEADER_SIZE];
+  if (file.read(headerBuf, HEADER_SIZE) != HEADER_SIZE || memcmp(headerBuf, CPFONT_MAGIC, 8) != 0 ||
+      readU16(headerBuf + 8) < CPFONT_MIN_VERSION || readU16(headerBuf + 8) > CPFONT_VERSION) {
+    file.close();
+    return 0;
+  }
+  const uint8_t styleCount = headerBuf[12];
+  if (styleCount == 0 || styleCount > MAX_STYLES) {
+    file.close();
+    return 0;
+  }
+
+  uint32_t intervalCount = 0;
+  uint32_t intervalsOffset = 0;
+  bool found = false;
+  for (uint8_t i = 0; i < styleCount && !found; i++) {
+    uint8_t tocBuf[STYLE_TOC_ENTRY_SIZE];
+    if (file.read(tocBuf, STYLE_TOC_ENTRY_SIZE) != STYLE_TOC_ENTRY_SIZE) break;
+    if (tocBuf[0] != 0) continue;  // regular style only
+    intervalCount = readU32(tocBuf + 4);
+    intervalsOffset = readU32(tocBuf + 24);
+    found = true;
+  }
+  if (!found || intervalCount == 0 || intervalCount > 4096 || !file.seekSet(intervalsOffset)) {
+    file.close();
+    return 0;
+  }
+
+  const uint32_t all = count >= 32 ? 0xFFFFFFFFu : ((1u << count) - 1u);
+  uint32_t hit = 0;
+  constexpr uint32_t CHUNK = 32;
+  EpdUnicodeInterval chunk[CHUNK];
+  for (uint32_t done = 0; done < intervalCount && hit != all; done += CHUNK) {
+    const uint32_t n = (intervalCount - done) < CHUNK ? (intervalCount - done) : CHUNK;
+    const size_t bytes = n * sizeof(EpdUnicodeInterval);
+    if (file.read(reinterpret_cast<uint8_t*>(chunk), bytes) != static_cast<int>(bytes)) break;
+    for (uint32_t k = 0; k < n; k++) {
+      for (uint8_t c = 0; c < count; c++) {
+        if (codepoints[c] >= chunk[k].first && codepoints[c] <= chunk[k].last) hit |= (1u << c);
+      }
+    }
+  }
+  file.close();
+  return hit;
+}
+
 // --- Load ---
 
 bool SdCardFont::load(const char* path) {
@@ -585,8 +647,8 @@ bool SdCardFont::load(const char* path) {
   }
 
   uint16_t fileVersion = readU16(headerBuf + 8);
-  if (fileVersion != CPFONT_VERSION) {
-    LOG_ERR("SDCF", "Unsupported version: %u (expected %u)", fileVersion, CPFONT_VERSION);
+  if (fileVersion < CPFONT_MIN_VERSION || fileVersion > CPFONT_VERSION) {
+    LOG_ERR("SDCF", "Unsupported version: %u (expected %u..%u)", fileVersion, CPFONT_MIN_VERSION, CPFONT_VERSION);
     return false;
   }
 
@@ -621,6 +683,12 @@ bool SdCardFont::load(const char* path) {
       return false;
     }
 
+    if (!styles_.create(styleId)) {
+      LOG_ERR("SDCF", "Out of memory for style %u", styleId);
+      file.close();
+      freeAll();
+      return false;
+    }
     auto& s = styles_[styleId];
     s.present = true;
     s.header.intervalCount = readU32(tocBuf + 4);
@@ -634,6 +702,11 @@ bool SdCardFont::load(const char* path) {
     s.header.kernRightClassCount = tocBuf[22];
     s.header.ligaturePairCount = tocBuf[23];
     s.header.is2Bit = is2Bit;
+    // Script cluster table (Bengali shaping). These bytes were reserved zeros
+    // before the table existed, so fonts without one read as "no shaping".
+    s.header.shapeKind = tocBuf[1];
+    s.header.shapeEntryCount = readU16(tocBuf + 2);
+    s.shapeTableFileOffset = readU32(tocBuf + 28);
 
     // Sanity-check counts to reject malformed files before allocating.
     // Kern class counts are uint8 (bounded by type). Entry counts are uint16
@@ -641,13 +714,33 @@ bool SdCardFont::load(const char* path) {
     static constexpr uint32_t MAX_INTERVALS = 4096;
     static constexpr uint32_t MAX_GLYPHS = 65536;
     static constexpr uint32_t MAX_KERN_ENTRIES = 4096;
+    static constexpr uint32_t MAX_SHAPE_ENTRIES = 8192;
     if (s.header.intervalCount > MAX_INTERVALS || s.header.glyphCount > MAX_GLYPHS ||
-        s.header.kernLeftEntryCount > MAX_KERN_ENTRIES || s.header.kernRightEntryCount > MAX_KERN_ENTRIES) {
-      LOG_ERR("SDCF", "Style %u: unreasonable counts (iv=%u, gl=%u, kL=%u, kR=%u)", styleId, s.header.intervalCount,
-              s.header.glyphCount, s.header.kernLeftEntryCount, s.header.kernRightEntryCount);
+        s.header.kernLeftEntryCount > MAX_KERN_ENTRIES || s.header.kernRightEntryCount > MAX_KERN_ENTRIES ||
+        s.header.shapeEntryCount > MAX_SHAPE_ENTRIES) {
+      LOG_ERR("SDCF", "Style %u: unreasonable counts (iv=%u, gl=%u, kL=%u, kR=%u, sh=%u)", styleId,
+              s.header.intervalCount, s.header.glyphCount, s.header.kernLeftEntryCount, s.header.kernRightEntryCount,
+              s.header.shapeEntryCount);
       file.close();
       freeAll();
       return false;
+    }
+    // A table kind this build cannot read, a table without a location, or
+    // one in the old flat layout (kind byte without the packed flag: the
+    // converter before Lipi table format 3) is ignored rather than rejected
+    // so the glyphs stay usable. The byte size is checked against the budget
+    // once the table's directory has been read, below.
+    if (s.header.shapeKind != 0 && (s.header.shapeKind & Lipi::TOC_KIND_PACKED) == 0) {
+      LOG_ERR("SDCF", "Style %u: cluster table in the old flat layout (kind %u); rebuild the font (table ignored)",
+              styleId, s.header.shapeKind);
+      s.header.shapeKind = 0;
+    }
+    s.header.shapeKind = static_cast<uint8_t>(s.header.shapeKind & ~Lipi::TOC_KIND_PACKED);
+    if (Lipi::entrySizeForKind(s.header.shapeKind) == 0 || s.header.shapeEntryCount == 0 ||
+        s.shapeTableFileOffset == 0) {
+      s.header.shapeKind = 0;
+      s.header.shapeEntryCount = 0;
+      s.shapeTableFileOffset = 0;
     }
 
     uint32_t dataOffset = readU32(tocBuf + 24);
@@ -748,12 +841,68 @@ bool SdCardFont::load(const char* path) {
       }
     }
 
+    // Script cluster table: resident for the font's lifetime (see PerStyle).
+    // Packed (Lipi format 3): its directory says how many bytes follow.
+    uint32_t tableBytes = 0;
+    if (s.header.shapeEntryCount > 0) {
+      uint8_t directory[Lipi::PACKED_DIRECTORY_BYTES];
+      uint32_t tableEntries = 0;
+      if (file.seekSet(s.shapeTableFileOffset) &&
+          file.read(directory, sizeof(directory)) == static_cast<int>(sizeof(directory))) {
+        tableBytes = Lipi::packedTableBytes(directory, s.header.shapeKind, &tableEntries);
+      }
+      if (tableBytes == 0 || tableEntries != s.header.shapeEntryCount || tableBytes > Lipi::MAX_SHAPE_TABLE_BYTES) {
+        LOG_ERR("SDCF", "Style %u: cluster table directory bad or over budget (%u bytes, %u of %u entries); ignored", i,
+                tableBytes, tableEntries, s.header.shapeEntryCount);
+        s.header.shapeKind = 0;
+        s.header.shapeEntryCount = 0;
+        s.shapeTableFileOffset = 0;
+        tableBytes = 0;
+      }
+    }
+    if (tableBytes > 0) {
+      uint8_t* tableBuf = new (std::nothrow) uint8_t[tableBytes];
+      if (!tableBuf) {
+        LOG_ERR("SDCF", "Failed to allocate %u-byte cluster table for style %u", tableBytes, i);
+        freeAll();
+        return false;
+      }
+      if (!file.seekSet(s.shapeTableFileOffset) || file.read(tableBuf, tableBytes) != static_cast<int>(tableBytes)) {
+        LOG_ERR("SDCF", "Failed to read cluster table for style %u", i);
+        delete[] tableBuf;
+        freeAll();
+        return false;
+      }
+      // Tables from the previous builder lack the format marker and would be
+      // misread (their entries carry no sign classes); the font then renders
+      // without conjunct shaping until it is rebuilt.
+      const Lipi::ClusterTable probe{tableBuf, s.header.shapeEntryCount, s.header.shapeKind};
+      const uint8_t format = Lipi::tableFormat(probe);
+      if (format != Lipi::TABLE_FORMAT) {
+        LOG_ERR("SDCF", "Style %u: cluster table format %u, expected %u; rebuild the font (table ignored)", i, format,
+                Lipi::TABLE_FORMAT);
+        delete[] tableBuf;
+        s.header.shapeKind = 0;
+        s.header.shapeEntryCount = 0;
+        s.shapeTableFileOffset = 0;
+      } else {
+        // Identical tables (the same family at other sizes) share one copy.
+        bool shared = false;
+        s.shapeTable = ShapeTableCache::acquire(tableBuf, tableBytes, s.header.shapeKind, &shared);
+        LOG_INF("SDCF", "Style %u: %u-byte cluster table %s (refs=%u)", i, tableBytes, shared ? "shared" : "loaded",
+                ShapeTableCache::refs(s.shapeTable));
+      }
+    }
+
     // Initialize stub data
     memset(&s.stubData, 0, sizeof(s.stubData));
     s.stubData.advanceY = s.header.advanceY;
     s.stubData.ascender = s.header.ascender;
     s.stubData.descender = s.header.descender;
     s.stubData.is2Bit = s.header.is2Bit;
+    s.stubData.shapeTable = s.shapeTable;
+    s.stubData.shapeEntryCount = s.header.shapeEntryCount;
+    s.stubData.shapeKind = s.header.shapeKind;
 
     s.epdFont.data = &s.stubData;
     applyGlyphMissCallback(i);
@@ -839,16 +988,27 @@ int SdCardFont::prewarm(const char* utf8Text, uint8_t styleMask, bool metadataOn
   // = ~131K comparisons, but in practice pages contain far fewer unique codepoints so the
   // actual cost is much lower. This is dwarfed by SD I/O that follows. Alternatives (hash
   // set, bitmap) exceed the 256-byte stack limit or add template bloat.
-  // Heap-allocated: MAX_PAGE_GLYPHS * 4 = 2048 bytes, too large for stack (limit < 256 bytes)
-  std::unique_ptr<uint32_t[]> codepoints(new (std::nothrow) uint32_t[MAX_PAGE_GLYPHS]);
+  // Heap-allocated (too large for the stack), sized by the text plus the
+  // codepoints this function adds itself (the replacement glyph and, in a full
+  // prewarm, each style's ligature outputs), capped at MAX_PAGE_GLYPHS: a
+  // redirected UI string of a dozen letters no longer pays 2 KB per measurement.
+  const uint32_t cpCap = countUtf8Codepoints(utf8Text, MAX_PAGE_GLYPHS);
+  uint32_t bufCap = cpCap + 1;
+  if (!metadataOnly) {
+    for (uint8_t si = 0; si < MAX_STYLES; si++) {
+      if ((styleMask & (1 << si)) && styles_[si].present) bufCap += styles_[si].header.ligaturePairCount;
+    }
+  }
+  if (bufCap > MAX_PAGE_GLYPHS) bufCap = MAX_PAGE_GLYPHS;
+  std::unique_ptr<uint32_t[]> codepoints(new (std::nothrow) uint32_t[bufCap]);
   if (!codepoints) {
-    LOG_ERR("SDCF", "Failed to allocate codepoint buffer (%u bytes)", MAX_PAGE_GLYPHS * 4);
+    LOG_ERR("SDCF", "Failed to allocate codepoint buffer (%u bytes)", static_cast<unsigned>(bufCap * 4));
     return failPrewarm(-1);
   }
   uint32_t cpCount = 0;
 
   const unsigned char* p = reinterpret_cast<const unsigned char*>(utf8Text);
-  while (*p && cpCount < MAX_PAGE_GLYPHS) {
+  while (*p && cpCount < cpCap) {
     uint32_t cp = utf8NextCodepoint(&p);
     if (cp == 0) break;
     if (utf8IsVariationSelector(cp)) continue;
@@ -874,7 +1034,7 @@ int SdCardFont::prewarm(const char* utf8Text, uint8_t styleMask, bool metadataOn
         break;
       }
     }
-    if (!hasReplacement && cpCount < MAX_PAGE_GLYPHS) {
+    if (!hasReplacement && cpCount < bufCap) {
       codepoints[cpCount++] = REPLACEMENT_GLYPH;
     }
   }
@@ -890,7 +1050,7 @@ int SdCardFont::prewarm(const char* utf8Text, uint8_t styleMask, bool metadataOn
 
       loadStyleKernLigatureData(s, includeKerning);
       if (s.ligaturePairs && s.header.ligaturePairCount > 0) {
-        for (uint8_t li = 0; li < s.header.ligaturePairCount && cpCount < MAX_PAGE_GLYPHS; li++) {
+        for (uint8_t li = 0; li < s.header.ligaturePairCount && cpCount < bufCap; li++) {
           uint32_t leftCp = s.ligaturePairs[li].pair >> 16;
           uint32_t rightCp = s.ligaturePairs[li].pair & 0xFFFF;
           uint32_t outCp = s.ligaturePairs[li].ligatureCp;
@@ -1235,6 +1395,9 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
   s.miniData.ascender = s.header.ascender;
   s.miniData.descender = s.header.descender;
   s.miniData.is2Bit = s.header.is2Bit;
+  s.miniData.shapeTable = s.shapeTable;
+  s.miniData.shapeEntryCount = s.header.shapeEntryCount;
+  s.miniData.shapeKind = s.header.shapeKind;
   if (typographyOk) {
     applyKernLigaturePointers(s, s.miniData, includeKerning);
   }
@@ -1527,7 +1690,13 @@ int SdCardFont::buildAdvanceTableRange(Iter begin, Iter end, bool includeSpace, 
   unsigned long startMs = millis();
 
   // +2 reserved slots for space and hyphen injected after the main scan.
-  static constexpr uint32_t MAX_UNIQUE_CODEPOINTS = 4096;
+  // The buffer holds unique codepoints, so it is sized by the smaller of the
+  // text's codepoint count and MAX_UNIQUE_CODEPOINTS: a 350-word Bengali
+  // paragraph has ~2,100 codepoints but ~100-200 distinct ones, and the
+  // old text-sized buffer cost 8 KB at the layout peak on the C3. With PSRAM
+  // (X4 Pro) the cap is four times higher, so a dense CJK paragraph with more
+  // than 512 distinct characters does not fall to per-glyph reads for the rest.
+  const uint32_t MAX_UNIQUE_CODEPOINTS = psramHeapAvailable() ? 2048 : 512;
   uint32_t sourceCodepointCount = 0;
   for (auto it = begin; it != end && sourceCodepointCount < MAX_UNIQUE_CODEPOINTS; ++it) {
     sourceCodepointCount += countUtf8Codepoints(asCStr(*it), MAX_UNIQUE_CODEPOINTS - sourceCodepointCount);
@@ -1535,7 +1704,8 @@ int SdCardFont::buildAdvanceTableRange(Iter begin, Iter end, bool includeSpace, 
   if (extraText && sourceCodepointCount < MAX_UNIQUE_CODEPOINTS) {
     sourceCodepointCount += countUtf8Codepoints(extraText, MAX_UNIQUE_CODEPOINTS - sourceCodepointCount);
   }
-  const uint32_t capacity = sourceCodepointCount + 2;
+  const uint32_t uniqueCap = sourceCodepointCount;  // <= MAX_UNIQUE_CODEPOINTS
+  const uint32_t capacity = uniqueCap + 2;
   auto codepoints = makeUniqueNoThrow<uint32_t[]>(capacity);
   if (!codepoints) {
     LOG_ERR("SDCF", "buildAdvanceTable: failed to allocate codepoint buffer (%u bytes)",
@@ -1546,10 +1716,10 @@ int SdCardFont::buildAdvanceTableRange(Iter begin, Iter end, bool includeSpace, 
   bool hitCap = false;
 
   for (auto it = begin; it != end && !hitCap; ++it) {
-    hitCap = collectUniqueCodepoints(asCStr(*it), codepoints.get(), cpCount, MAX_UNIQUE_CODEPOINTS);
+    hitCap = collectUniqueCodepoints(asCStr(*it), codepoints.get(), cpCount, uniqueCap);
   }
   if (extraText && !hitCap) {
-    hitCap = collectUniqueCodepoints(extraText, codepoints.get(), cpCount, MAX_UNIQUE_CODEPOINTS);
+    hitCap = collectUniqueCodepoints(extraText, codepoints.get(), cpCount, uniqueCap);
   }
 
   if (includeSpace && std::none_of(codepoints.get(), codepoints.get() + cpCount, [](uint32_t c) { return c == ' '; }))

@@ -1,6 +1,7 @@
 add_executable(Utf8ComposeTest
   Utf8ComposeTest.cpp
   ${REPO_ROOT}/lib/Utf8/Utf8.cpp
+  ${REPO_ROOT}/lipi/engine/Lipi.cpp  # the mark queries of LipiMarks.h live in the engine
 )
 
 target_include_directories(Utf8ComposeTest PRIVATE

@@ -24,8 +24,10 @@ target_link_libraries(InflateStreamStorageTest PRIVATE crosspoint_test_common GT
 gtest_discover_tests(InflateStreamStorageTest PROPERTIES ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1")
 
 add_executable(SdFontBitmapStorageTest SdFontBitmapStorageTest.cpp
-  ${REPO_ROOT}/lib/EpdFont/SdCardFont.cpp ${REPO_ROOT}/lib/EpdFont/EpdFont.cpp ${REPO_ROOT}/lib/Utf8/Utf8.cpp)
-target_include_directories(SdFontBitmapStorageTest PRIVATE stubs ${REPO_ROOT}/lib/Memory ${REPO_ROOT}/lib/MemoryBudget ${REPO_ROOT}/lib/EpdFont ${REPO_ROOT}/lib/Utf8)
+  ${REPO_ROOT}/lib/EpdFont/SdCardFont.cpp ${REPO_ROOT}/lib/EpdFont/EpdFont.cpp ${REPO_ROOT}/lib/Utf8/Utf8.cpp
+  ${REPO_ROOT}/lipi/engine/Lipi.cpp)
+target_include_directories(SdFontBitmapStorageTest PRIVATE stubs ${REPO_ROOT}/lib/Memory ${REPO_ROOT}/lib/MemoryBudget ${REPO_ROOT}/lib/EpdFont ${REPO_ROOT}/lib/Utf8
+  ${REPO_ROOT}/lipi/engine)
 target_compile_definitions(SdFontBitmapStorageTest PRIVATE ARDUINO_ARCH_ESP32=1 CROSSINK_MEMORY_TEST=1)
 target_link_libraries(SdFontBitmapStorageTest PRIVATE crosspoint_test_common GTest::gtest_main)
 gtest_discover_tests(SdFontBitmapStorageTest PROPERTIES ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1")
@@ -39,7 +41,8 @@ gtest_discover_tests(CssArenaBackingTest PROPERTIES ENVIRONMENT "UBSAN_OPTIONS=h
 function(add_layout_test name root)
   add_executable(${name} TextLayoutBackingTest.cpp
     ${root}/lib/Epub/Epub/ParsedText.cpp ${root}/lib/Epub/Epub/blocks/TextBlock.cpp
-    ${root}/lib/MiniBidi/BidiUtils.cpp ${root}/lib/MiniBidi/minibidi.c ${root}/lib/Utf8/Utf8.cpp)
+    ${root}/lib/MiniBidi/BidiUtils.cpp ${root}/lib/MiniBidi/minibidi.c ${root}/lib/Utf8/Utf8.cpp
+    ${REPO_ROOT}/lipi/engine/Lipi.cpp)  # Utf8.cpp asks Lipi::isMark
   target_include_directories(${name} PRIVATE stubs ${root}/lib/Memory ${root}/lib/MemoryBudget
     ${root}/lib/Epub ${root}/lib/EpdFont ${root}/lib/Utf8 ${root}/lib/MiniBidi ${root}/lib/Serialization)
   target_compile_definitions(${name} PRIVATE ARDUINO_ARCH_ESP32=1 CROSSINK_MEMORY_TEST=1)
@@ -51,3 +54,8 @@ if(PSRAM_REFERENCE_ROOT)
   add_layout_test(TextLayoutReferenceTest ${PSRAM_REFERENCE_ROOT})
   target_compile_definitions(TextLayoutReferenceTest PRIVATE PSRAM_REFERENCE=1)
 endif()
+
+add_executable(ShapeTableCacheTest ShapeTableCacheTest.cpp)
+target_include_directories(ShapeTableCacheTest PRIVATE ${REPO_ROOT}/lib/EpdFont)
+target_link_libraries(ShapeTableCacheTest PRIVATE crosspoint_test_common GTest::gtest_main)
+gtest_discover_tests(ShapeTableCacheTest PROPERTIES ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1")

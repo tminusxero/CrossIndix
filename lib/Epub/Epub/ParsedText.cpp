@@ -5,6 +5,7 @@
 #include <BidiUtils.h>
 #include <GfxRenderer.h>
 #include <Logging.h>
+#include <ScriptBlock.h>
 #include <Utf8.h>
 
 #include <algorithm>
@@ -372,6 +373,15 @@ size_t guideDotGapSlots(const std::string& rightWord) {
   return 1 + (isClosingPunctuationForJustify(firstCodepoint(rightWord)) ? 0 : 1);
 }
 
+// The gap the word-spacing extra is judged on. A font may drop a danda's
+// built-in space after a space character (GfxRenderer::getSpaceAdvance takes
+// the danda's share off the space, down to 0 for Tiro Bangla), but a space
+// character is still there, so the extra follows the plain space width.
+int gapForWordSpacing(const GfxRenderer& renderer, const int fontId, const std::string& rightWord,
+                      const EpdFontFamily::Style style, const int naturalGap) {
+  return isIndicDanda(firstCodepoint(rightWord)) ? renderer.getSpaceWidth(fontId, style) : naturalGap;
+}
+
 int wordSpacingExtraFromGap(const int gap, const uint8_t wordSpacing) {
   if (gap <= 0) {
     return 0;
@@ -388,7 +398,8 @@ int guideDotWordSpacingExtra(const GfxRenderer& renderer, const int fontId, cons
                              const uint8_t wordSpacing) {
   const int naturalWordGap =
       renderer.getSpaceAdvance(fontId, lastCodepoint(leftWord), firstCodepoint(rightWord), leftStyle);
-  return wordSpacingExtraFromGap(naturalWordGap, wordSpacing);
+  return wordSpacingExtraFromGap(gapForWordSpacing(renderer, fontId, rightWord, leftStyle, naturalWordGap),
+                                 wordSpacing);
 }
 
 int naturalGapBeforeToken(const GfxRenderer& renderer, const int fontId, const std::string& leftWord,
@@ -406,7 +417,8 @@ int naturalGapBeforeToken(const GfxRenderer& renderer, const int fontId, const s
   }
   const int naturalGap =
       renderer.getSpaceAdvance(fontId, lastCodepoint(leftWord), firstCodepoint(rightWord), leftStyle);
-  return naturalGap + wordSpacingExtraFromGap(naturalGap, wordSpacing);
+  return naturalGap +
+         wordSpacingExtraFromGap(gapForWordSpacing(renderer, fontId, rightWord, leftStyle, naturalGap), wordSpacing);
 }
 
 size_t gapSlotsBeforeToken(const std::string& rightWord, const bool continues, const bool noSpaceBefore,

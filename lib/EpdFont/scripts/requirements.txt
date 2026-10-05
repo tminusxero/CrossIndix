@@ -2,3 +2,5 @@ fonttools>=4.62.1
 freetype-py>=2.5.1
 pyyaml>=6.0.3
 zopfli>=0.2.0
+# Cluster pre-shaping (fontconvert_sdcard.py --shape) via the Lipi submodule: see lipi/builder/requirements.txt
+uharfbuzz>=0.40.0

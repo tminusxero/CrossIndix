@@ -303,6 +303,12 @@ Binary layout:
 
 ## `section.bin`
 
+> **CrossIndix.** This fork writes version byte `128` and suspended partials with
+> sentinel `0xF6` (`lib/Epub/Epub/Section.cpp`, `SECTION_FILE_VERSION` /
+> `SECTION_FILE_PARTIAL_VERSION`), far from upstream's numbers so a cache written
+> by either firmware is rejected by the other. The layout is upstream's version 77
+> below; the pattern's `EXPECTED_VERSION` must read `128` for CrossIndix files.
+
 ### Version 77
 
 Version 77 keeps the serialized layout unchanged. It was bumped because ordered
@@ -319,6 +325,41 @@ the HTML `hidden` attribute. Complete files use byte `75`; suspended partials us
 `0xF4`. Both older full and partial layouts rebuild automatically.
 Versions 67–74 and partial sentinel 0xF5 already occur in other local branch
 history; using fresh identifiers avoids accepting those experimental caches.
+
+### Version 70
+
+Version 70 keeps the version 69 serialized layout unchanged. It was bumped
+because the cluster-table format 2 chooses the contextual variants of the
+pre- and post-base vowel signs (ি ী ि ी) through sign classes, so a word can
+be measured a pixel wider or narrower than a version 69 cache recorded.
+Complete files use version byte `70`.
+
+### Version 69
+
+Version 69 keeps the version 68 serialized layout unchanged. It was bumped
+because the Indic cluster-table format gained table kinds 2-10 (the scripts
+after Bengali) and two more Private Use mark classes (`U+F200-U+F2FF`,
+`U+F300-U+F3FF`) that are now measured as zero-advance overlays, so cached
+word widths for fonts carrying those tables no longer match what is drawn.
+Bengali (kind 1) output is unchanged. Complete files use version byte `69`.
+
+### Version 68
+
+Version 68 keeps the version 67 serialized layout unchanged. It was bumped
+because Bengali shaping now emits the contextual vowel-sign forms a desktop
+OpenType engine picks (word-initial ে/ৈ, word-final া/ী/ৗ, ি and ী sized
+to their base or fused with a reph, candrabindu and below signs placed
+before a ya-phala), so cached Bengali word widths and positions from version
+67 no longer match what is drawn. Complete files use version byte `68`.
+
+### Version 67
+
+Version 67 keeps the version 66 serialized layout unchanged. It was bumped
+because Bengali text is now shaped before measurement and drawing (cluster
+glyphs from the font's cluster table, pre-base vowel signs reordered, marks
+drawn as zero-advance overlays), so cached Bengali word positions from
+version 66 no longer match what is drawn. Complete files use version byte
+`67`.
 
 ### Version 66
 
@@ -675,6 +716,60 @@ if (parsedSize != fileSize) {
     std::warning(std::format("Unparsed data detected: {} bytes remaining at offset 0x{:X}", fileSize - parsedSize, parsedSize));
 }
 ```
+
+## `.cpfont` glyph record and mark anchors (versions 5 and 6)
+
+Each glyph record is 16 bytes: `u8 width, u8 height, u16 advanceX (12.4), i16 left, i16 top,
+u16 dataLength, u8 anchorAbove, u8 anchorBelow, u24 dataOffset, u8 anchorExtra`. Version 4
+files carry zeros in bytes 10-11 (padding) and still load; version 5 files written by
+`fontconvert_sdcard.py --shape` fill them with the font's mark attachment points, read off
+HarfBuzz's GPOS mark-to-base positioning (`lipi/builder/shaping.py`, `compute_anchors`):
+
+- a base glyph (letter, vowel sign, PUA composite) stores where an above / below mark's
+  origin lands, as an x offset from the base cursor;
+- a mark glyph stores its own anchor, as an x offset from its origin, in the byte of its
+  class (`combiningMark::attachesBelow` decides above or below);
+- units are half pixels at the file's size, biased by 128; 0 means no anchor.
+
+Version 6 (2026-09-19) adds a third base point and per-mark placement modes, so a mark the
+font attaches somewhere else than the class probe (Tiro Devanagari Sanskrit's anusvara,
+Noto Serif Bengali's ba-phala, Hind Siliguri's nukta and hasanta) lands where HarfBuzz puts
+it:
+
+- byte 15, the top byte of the former `u32 dataOffset`, is `anchorExtra` on a base glyph
+  (bitmap offsets stay below 16 MB; v4/v5 files read as 0 = none);
+- a mark glyph's other-class byte is its mode: 0 = value measured from the base anchor of
+  its class (the v5 rule), 1 = from the base's advance (pen), 2 = from the other class's
+  base anchor, 3 = from `anchorExtra`. The builder picks per mark and font the mode with the
+  smallest residual, and the `anchorExtra` probe with the largest gain.
+
+The renderer draws a mark at `base cursor + (basePoint - markAnchor) / 2` when both bytes
+are set (`glyphAnchor::markOffsetWithMode`) and falls back to the `anchorFor` rules
+otherwise (built-in fonts, v4 files, glyphs the probe marks never attach to). Pairs the
+font draws as one glyph are cluster-table composites and need no anchor. Firmware up to
+a7bd72f4 (v5) refuses v6 files; v6 firmware loads v4, v5 and v6.
+
+## `.cpfont` cluster table
+
+An SD-card font (`.cpfont`, written by `lib/EpdFont/scripts/fontconvert_sdcard.py`)
+may carry one cluster table per style for a shaped script. The style TOC entry
+records the table's kind (byte `[1]`), its entry count (`uint16_t` LE at
+`[2-3]`) and its absolute file offset (`uint32_t` LE at `[28-31]`); these bytes
+were reserved zeros before the table existed, so older fonts read as "no
+table". Since Lipi table format 3 the table is packed and the kind byte
+carries the flag `0x80` (`Lipi::TOC_KIND_PACKED`): the loader reads the
+table's 18-byte directory first to size the load, checks the entry count
+against the TOC, and ignores a table whose kind byte lacks the flag (the
+old fixed-row layout: "rebuild the font"). The firmware only reads a table
+whose kind matches the script it is shaping and ignores tables of kinds it
+does not know, without a location, or larger than `MAX_SHAPE_TABLE_BYTES`
+(16384 bytes).
+
+The table bytes, the key alphabet, the kinds and the Private Use classes of
+the output codepoints are specified by the Lipi engine that reads them:
+`lipi/docs/table-format.md` and `lipi/docs/pua-classes.md` (the `lipi/`
+submodule). The firmware side is `lipi/engine/`; the converter calls
+`lipi/builder/shaping.py` to write the table.
 
 ## Optimizer image transport (PXC2 and COIX)
 

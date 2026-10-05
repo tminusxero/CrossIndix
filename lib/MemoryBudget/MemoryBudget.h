@@ -49,6 +49,18 @@ constexpr uint32_t OPTIONAL_EPUB_PREFETCH_AFTER_SD_FONT_RELEASE_MIN_FREE = 88U *
 // Initial C3 guard for switching to a different dictionary .cpfont. Both total
 // free heap and contiguous maxAlloc matter because font metadata and prewarm
 // arenas are separate allocations. Hardware stress logs should tune these.
+// Lazily loading one UI-size SD font for a script the built-in fonts lack
+// (see SdCardFontSystem::uiFontFor). Below this the string keeps its
+// replacement glyphs instead of risking the heap mid-render.
+constexpr uint32_t UI_SD_FONT_MIN_FREE = 40U * 1024U;
+constexpr uint32_t UI_SD_FONT_MIN_MAX_ALLOC = 24U * 1024U;
+// Before loading another UI script font, resident UI fonts are unloaded (least
+// recently drawn size first) until free heap reaches this much, so a screen of
+// titles in many scripts keeps what fits instead of a fixed family count. The
+// target is the load floor plus one UI font (8 pt UI fonts hold 7.4 to 12.2 KB
+// of bitmaps in the x4-pro simulator logs), so one eviction usually suffices;
+// at 64 KB a C3 with 45 KB free evicted every resident font and reloaded them.
+constexpr uint32_t UI_SD_FONT_EVICT_BELOW_FREE = UI_SD_FONT_MIN_FREE + 12U * 1024U;
 constexpr uint32_t DICTIONARY_SD_FONT_MIN_FREE = 64U * 1024U;
 constexpr uint32_t DICTIONARY_SD_FONT_MIN_MAX_ALLOC = 32U * 1024U;
 constexpr uint32_t IMAGE_DECODER_HEADROOM = 16U * 1024U;

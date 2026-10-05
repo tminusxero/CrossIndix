@@ -2,6 +2,7 @@ add_executable(DictLayoutTest
   DictLayoutTest.cpp
   ${REPO_ROOT}/src/util/DictLayout.cpp
   ${REPO_ROOT}/lib/Utf8/Utf8.cpp
+  ${REPO_ROOT}/lipi/engine/Lipi.cpp  # the mark queries of LipiMarks.h live in the engine
 )
 
 target_link_libraries(DictLayoutTest PRIVATE

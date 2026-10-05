@@ -1,5 +1,6 @@
 add_executable(CombiningMarkAnchorTest
   CombiningMarkAnchorTest.cpp
+  ${REPO_ROOT}/lipi/engine/Lipi.cpp  # the mark queries of LipiMarks.h live in the engine
 )
 
 target_include_directories(CombiningMarkAnchorTest PRIVATE

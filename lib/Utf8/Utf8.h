@@ -1,5 +1,7 @@
 #pragma once
 
+#include <LipiMarks.h>
+
 #include <cstdint>
 #include <string>
 #define REPLACEMENT_GLYPH 0xFFFD
@@ -105,13 +107,27 @@ inline bool utf8IsCjkWordCharacter(const uint32_t cp) {
          || (cp >= 0x30000 && cp <= 0x323AF);  // CJK Extensions G-H
 }
 
-// Returns true for Unicode combining diacritical marks that should not advance the cursor.
-inline bool utf8IsCombiningMark(const uint32_t cp) {
+// Indic non-spacing marks and the Private Use ranges the font builder
+// allocates for shaped cluster marks, all drawn as zero-advance overlays on
+// the preceding base glyph. The per-script sets live in the Lipi descriptors
+// (lipi/providers/*/descriptor.h); this is the name the renderer's mark path uses.
+inline bool utf8IsIndicMark(const uint32_t cp) { return Lipi::isMark(cp); }
+
+// The Unicode combining diacritical marks (the accents of Latin, Greek and
+// Cyrillic text). This is the upstream meaning of "combining mark", the one the
+// dictionary's IPA and definition cleaning rely on: a Bengali vowel sign is not
+// a diacritic to strip.
+inline bool utf8IsCombiningDiacritic(const uint32_t cp) {
   return (cp >= 0x0300 && cp <= 0x036F)      // Combining Diacritical Marks
          || (cp >= 0x1DC0 && cp <= 0x1DFF)   // Combining Diacritical Marks Supplement
          || (cp >= 0x20D0 && cp <= 0x20FF)   // Combining Diacritical Marks for Symbols
          || (cp >= 0xFE20 && cp <= 0xFE2F);  // Combining Half Marks
 }
+
+// Returns true for every mark drawn as a zero-advance overlay on the preceding
+// glyph: the combining diacritics above and the Indic marks the Lipi engine
+// anchors. Layout (no break before a mark) and rendering use this one.
+inline bool utf8IsCombiningMark(const uint32_t cp) { return utf8IsCombiningDiacritic(cp) || utf8IsIndicMark(cp); }
 
 // Variation selectors modify the preceding glyph's presentation. The bitmap
 // font pipeline has no variation-selector lookup, so they must not fall back

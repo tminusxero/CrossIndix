@@ -3,6 +3,7 @@ add_executable(MiniBidiArabicTest
   ${REPO_ROOT}/lib/MiniBidi/minibidi.c
   ${REPO_ROOT}/lib/MiniBidi/BidiUtils.cpp
   ${REPO_ROOT}/lib/Utf8/Utf8.cpp
+  ${REPO_ROOT}/lipi/engine/Lipi.cpp  # the mark queries of LipiMarks.h live in the engine
 )
 
 target_include_directories(MiniBidiArabicTest PRIVATE

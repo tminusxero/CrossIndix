@@ -221,6 +221,10 @@ const EpdGlyph* EpdFontFamily::getGlyph(const uint32_t cp, const Style style) co
 
 uint32_t EpdFontFamily::getFallbackCodepoint(const uint32_t cp, const Style style) const {
   if (findGlyphData(cp, style).glyph) return cp;
+  // SD-card fonts keep only the prewarmed glyphs resident; anything else the
+  // font covers is fetched on demand by getGlyph(), so it must not be turned
+  // into the replacement glyph here.
+  if (getFont(style)->hasCodepoint(cp) || regular->hasCodepoint(cp)) return cp;
   const uint32_t aliasCp = syntheticGlyph::aliasCodepoint(cp);
   if (aliasCp != cp) {
     return findGlyphData(aliasCp, style).glyph ? aliasCp : REPLACEMENT_GLYPH;
