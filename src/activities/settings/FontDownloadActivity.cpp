@@ -12,6 +12,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #include "CrossPointSettings.h"
 #include "MappedInputManager.h"
@@ -269,12 +270,155 @@ bool FontDownloadActivity::internManifestString(const char* const text, const ch
   return true;
 }
 
-bool FontDownloadActivity::fetchAndParseManifest() {
-  // Download manifest to a temp file on SD card to avoid holding both
-  // TLS buffers and the full JSON string in RAM simultaneously.
-  static constexpr const char* MANIFEST_TMP = "/fonts_manifest.tmp";
+bool FontDownloadActivity::downloadManifestSource(const char* url, const char* path,
+                                                  HttpDownloader::DownloadOptions& options, bool& cancelled) {
+  cancelled = false;
+  Storage.remove(path);
+  HttpDownloader::DownloadError result = HttpDownloader::HTTP_ERROR;
+  for (int attempt = 1; attempt <= FONT_MANIFEST_MAX_ATTEMPTS; ++attempt) {
+    if (attempt > 1) {
+      LOG_DBG("FONT", "Retrying font manifest download (%d/%d)", attempt, FONT_MANIFEST_MAX_ATTEMPTS);
+      delay(FONT_DOWNLOAD_RETRY_DELAY_MS);
+    }
+    result = HttpDownloader::downloadToFile(url, path, nullptr, &cancelRequested_, "", "", options);
+    if (result == HttpDownloader::OK || result == HttpDownloader::ABORTED) break;
+    if (options.shouldCancel()) {
+      result = HttpDownloader::ABORTED;
+      break;
+    }
+    LOG_ERR("FONT", "Font manifest download attempt failed (%d/%d, error=%d)", attempt, FONT_MANIFEST_MAX_ATTEMPTS,
+            result);
+  }
+  if (result == HttpDownloader::OK) return true;
+  Storage.remove(path);
+  if (result == HttpDownloader::ABORTED) {
+    LOG_INF("FONT", "Font list loading cancelled");
+    cancelled = true;
+  } else {
+    LOG_ERR("FONT", "Failed to fetch manifest from %s", url);
+  }
+  return false;
+}
 
-  baseUrl_.clear();
+bool FontDownloadActivity::parseManifestSource(const char* path, const uint8_t source,
+                                               const std::vector<std::string>* skipNames, const bool fill,
+                                               ManifestCounts& counts) {
+  FsFile manifestFile;
+  if (!Storage.openFileForRead("FONT", path, manifestFile)) {
+    LOG_ERR("FONT", "Failed to open temp manifest %s", path);
+    return false;
+  }
+
+  // The parsed manifest and the installed-font registry are each large when many
+  // families are installed. The JsonDocument lives only inside this function, so
+  // the two are never resident at the same time (their coexistence aborted the
+  // parse on low-heap devices with many SD fonts installed).
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, manifestFile);
+  manifestFile.close();
+  if (err) {
+    LOG_ERR("FONT", "Manifest parse error (%s): %s", path, err.c_str());
+    return false;
+  }
+
+  int version = doc["version"] | 0;
+  if (version != FONTS_MANIFEST_VERSION) {
+    LOG_ERR("FONT", "Unsupported manifest version in %s: %d", path, version);
+    return false;
+  }
+  if (fill) baseUrls_[source] = doc["baseUrl"] | "";
+
+  const auto skipped = [skipNames](const char* name) {
+    if (skipNames == nullptr) return false;
+    for (const auto& skip : *skipNames) {
+      if (skip == name) return true;
+    }
+    return false;
+  };
+
+  JsonArray familiesArr = doc["families"].as<JsonArray>();
+  // ArduinoJson owns a second copy of every manifest string. Consume the array
+  // from the front and remove each family after handling it so those strings
+  // are released before the next entries are read. Keeping the whole JSON tree
+  // alive can exhaust the heap partway through the list.
+  while (!familiesArr.isNull() && familiesArr.size() > 0) {
+    JsonObject fObj = familiesArr[0];
+    const char* const name = fObj["name"] | "";
+    const char* const description = fObj["description"] | "";
+    const char* const languages = fObj["languages"] | "";
+    if (skipped(name)) {
+      familiesArr.remove(0);
+      continue;
+    }
+
+    ManifestFamily family;
+    family.source = source;
+    if (fill) {
+      family.fileStart = counts.parsedFiles;
+      family.totalSize = 0;
+    }
+
+    size_t familyFiles = 0;
+    for (JsonObject fileObj : fObj["files"].as<JsonArray>()) {
+      const char* const fileName = fileObj["name"] | "";
+      uint8_t pointSize = 0;
+      if (!parseManifestPointSize(fileName, pointSize)) {
+        LOG_ERR("FONT", "Malformed manifest file entry: invalid filename %s", fileName);
+        return false;
+      }
+      if (!CrossPointSettings::isSdFontPointSizeAllowedForRange(pointSize, SETTINGS.sdFontSizeRange)) continue;
+
+      if (!fill) {
+        counts.stringBytes += strlen(fileName) + 1;
+        ++familyFiles;
+        continue;
+      }
+
+      ManifestFile file;
+      file.pointSize = pointSize;
+      if (!internManifestString(fileName, file.name)) return false;
+      file.size = fileObj["size"] | 0;
+      if (!fileObj["crc32"].is<uint32_t>()) {
+        LOG_ERR("FONT", "Malformed manifest file entry: missing or invalid crc32 for %s", file.name);
+        return false;
+      }
+      file.crc32 = fileObj["crc32"].as<uint32_t>();
+      family.totalSize += file.size;
+      manifestFiles_[counts.parsedFiles++] = file;
+      ++familyFiles;
+    }
+
+    if (familyFiles > 0) {
+      if (fill) {
+        // Labels are interned only for families that keep a file: the arena was
+        // sized that way by the counting pass.
+        if (!internManifestString(name, family.name) || !internManifestString(description, family.description) ||
+            !internManifestString(languages, family.languages)) {
+          return false;
+        }
+        family.fileCount = familyFiles;
+        manifestFamilies_[counts.parsedFamilies++] = std::move(family);
+      } else {
+        counts.stringBytes += strlen(name) + 1 + strlen(description) + 1 + strlen(languages) + 1;
+        counts.fileCount += familyFiles;
+        ++counts.familyCount;
+      }
+    }
+    familiesArr.remove(0);
+  }
+  return true;
+}
+
+bool FontDownloadActivity::fetchAndParseManifest() {
+  // Download each manifest to a temp file on the SD card to avoid holding both
+  // TLS buffers and the full JSON string in RAM simultaneously.
+  static constexpr const char* const MANIFEST_TMP[kManifestSourceCount] = {"/fonts_manifest0.tmp",
+                                                                           "/fonts_manifest1.tmp"};
+  static constexpr const char* const MANIFEST_URL[kManifestSourceCount] = {FONT_MANIFEST_URL_UPSTREAM,
+                                                                           FONT_MANIFEST_URL};
+  static constexpr uint8_t kOwnSource = 1;
+
+  for (auto& url : baseUrls_) url.clear();
   clearManifestFamilies();
   manifestStringArena_.reset();
   manifestStringArenaUsed_ = 0;
@@ -283,7 +427,7 @@ bool FontDownloadActivity::fetchAndParseManifest() {
   cancelRequested_ = false;
   goHomeRequested_ = false;
 
-  // Poll the Cancel (Back) button while the manifest downloads so a slow or
+  // Poll the Cancel (Back) button while the manifests download so a slow or
   // failing network can be backed out of. HttpDownloader checks shouldCancel on
   // every read-loop iteration, and we re-check it between retry attempts so the
   // retry delays do not swallow the press.
@@ -293,188 +437,97 @@ bool FontDownloadActivity::fetchAndParseManifest() {
   // memory on every manifest load, not only when entering Manage Fonts.
   sdFontSystem.releaseForNetwork(renderer);
 
-  Storage.remove(MANIFEST_TMP);
-  HttpDownloader::DownloadError result = HttpDownloader::HTTP_ERROR;
-  for (int attempt = 1; attempt <= FONT_MANIFEST_MAX_ATTEMPTS; ++attempt) {
-    if (attempt > 1) {
-      LOG_DBG("FONT", "Retrying font manifest download (%d/%d)", attempt, FONT_MANIFEST_MAX_ATTEMPTS);
-      delay(FONT_DOWNLOAD_RETRY_DELAY_MS);
-    }
-    result = HttpDownloader::downloadToFile(FONT_MANIFEST_URL, MANIFEST_TMP, nullptr, &cancelRequested_, "", "",
-                                            manifestOptions);
-    if (result == HttpDownloader::OK || result == HttpDownloader::ABORTED) break;
-    if (manifestOptions.shouldCancel()) {
-      result = HttpDownloader::ABORTED;
-      break;
-    }
-    LOG_ERR("FONT", "Font manifest download attempt failed (%d/%d, error=%d)", attempt, FONT_MANIFEST_MAX_ATTEMPTS,
-            result);
-  }
-  if (result != HttpDownloader::OK) {
-    Storage.remove(MANIFEST_TMP);
-    if (result == HttpDownloader::ABORTED) {
-      LOG_INF("FONT", "Font list loading cancelled");
+  bool present[kManifestSourceCount] = {false, false};
+  size_t presentCount = 0;
+  for (uint8_t i = 0; i < kManifestSourceCount; ++i) {
+    bool cancelled = false;
+    present[i] = downloadManifestSource(MANIFEST_URL[i], MANIFEST_TMP[i], manifestOptions, cancelled);
+    if (cancelled) {
+      for (const char* path : MANIFEST_TMP) Storage.remove(path);
       return false;
     }
-    LOG_ERR("FONT", "Failed to fetch manifest from %s", FONT_MANIFEST_URL);
+    if (present[i]) ++presentCount;
+  }
+  if (presentCount == 0) {
     errorMessage_ = "Failed to fetch font list";
     return false;
   }
 
-  // HTTP client is now closed — TLS buffers freed. Parse JSON from file.
-  FsFile manifestFile;
-  if (!Storage.openFileForRead("FONT", MANIFEST_TMP, manifestFile)) {
-    LOG_ERR("FONT", "Failed to open temp manifest");
-    Storage.remove(MANIFEST_TMP);
-    errorMessage_ = "Failed to read font list";
+  const auto removeTemps = [&]() {
+    for (const char* path : MANIFEST_TMP) Storage.remove(path);
+  };
+  const auto failInvalid = [&]() {
+    removeTemps();
+    errorMessage_ = "Invalid font manifest";
+    return false;
+  };
+
+  // Names CrossIndix provides itself: an upstream family of the same name is
+  // left out, so a shaped Indic font is never shadowed by an unshaped one.
+  std::vector<std::string> ownNames;
+  if (present[kOwnSource]) {
+    FsFile ownFile;
+    if (Storage.openFileForRead("FONT", MANIFEST_TMP[kOwnSource], ownFile)) {
+      JsonDocument doc;
+      const DeserializationError err = deserializeJson(doc, ownFile);
+      ownFile.close();
+      if (!err) {
+        for (JsonObject fObj : doc["families"].as<JsonArray>()) ownNames.emplace_back(fObj["name"] | "");
+      }
+    }
+  }
+
+  // HTTP clients are closed, TLS buffers freed. Count, allocate once, then fill.
+  ManifestCounts counts;
+  for (uint8_t i = 0; i < kManifestSourceCount; ++i) {
+    if (!present[i]) continue;
+    if (!parseManifestSource(MANIFEST_TMP[i], i, i == kOwnSource ? nullptr : &ownNames, false, counts)) {
+      return failInvalid();
+    }
+  }
+
+  // The catalog is long-lived while this activity is open. Its strings are
+  // therefore one checked allocation, not hundreds of independently grown
+  // std::strings that can leave the next download without a TLS-sized block.
+  manifestStringArena_ = makeUniqueNoThrow<char[]>(counts.stringBytes);
+  if (!manifestStringArena_) {
+    LOG_ERR("FONT", "OOM: %zu-byte font manifest string arena (free=%u maxAlloc=%u)", counts.stringBytes,
+            ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+    removeTemps();
+    errorMessage_ = tr(STR_MEMORY_ERROR);
+    return false;
+  }
+  manifestStringArena_[0] = '\0';
+  manifestStringArenaUsed_ = 1;
+  manifestStringArenaCapacity_ = counts.stringBytes;
+
+  manifestFiles_ = makeUniqueNoThrow<ManifestFile[]>(counts.fileCount);
+  if (counts.fileCount > 0 && !manifestFiles_) {
+    LOG_ERR("FONT", "OOM: %zu-entry font manifest file table (free=%u maxAlloc=%u)", counts.fileCount,
+            ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+    removeTemps();
+    errorMessage_ = tr(STR_MEMORY_ERROR);
+    return false;
+  }
+  manifestFamilies_ = makeUniqueNoThrow<ManifestFamily[]>(counts.familyCount);
+  if (counts.familyCount > 0 && !manifestFamilies_) {
+    LOG_ERR("FONT", "OOM: %zu-entry font manifest family table (free=%u maxAlloc=%u)", counts.familyCount,
+            ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+    removeTemps();
+    errorMessage_ = tr(STR_MEMORY_ERROR);
     return false;
   }
 
-  // The parsed manifest and the installed-font registry are each large when many
-  // families are installed. Keep the JsonDocument in its own scope and defer
-  // loading the registry until after it is freed (see second pass below), so the
-  // two are never resident at the same time. Their coexistence here is what
-  // aborted during parse on low-heap devices with many SD fonts installed.
-  {
-    JsonDocument doc;
-    DeserializationError err = deserializeJson(doc, manifestFile);
-    manifestFile.close();
-    Storage.remove(MANIFEST_TMP);
-
-    if (err) {
-      LOG_ERR("FONT", "Manifest parse error: %s", err.c_str());
-      errorMessage_ = "Invalid font manifest";
-      return false;
+  for (uint8_t i = 0; i < kManifestSourceCount; ++i) {
+    if (!present[i]) continue;
+    if (!parseManifestSource(MANIFEST_TMP[i], i, i == kOwnSource ? nullptr : &ownNames, true, counts)) {
+      return failInvalid();
     }
-
-    int version = doc["version"] | 0;
-    if (version != FONTS_MANIFEST_VERSION) {
-      LOG_ERR("FONT", "Unsupported manifest version: %d", version);
-      errorMessage_ = "Unsupported manifest version";
-      return false;
-    }
-
-    JsonArray familiesArr = doc["families"].as<JsonArray>();
-    size_t stringBytes = 1;  // A stable address for every empty manifest string.
-    size_t retainedFamilyCount = 0;
-    size_t retainedFileCount = 0;
-    for (JsonObject fObj : familiesArr) {
-      const char* const name = fObj["name"] | "";
-      const char* const description = fObj["description"] | "";
-      const char* const languages = fObj["languages"] | "";
-      stringBytes += strlen(name) + 1;
-      stringBytes += strlen(description) + 1;
-      stringBytes += strlen(languages) + 1;
-
-      bool hasAllowedFile = false;
-      for (JsonObject fileObj : fObj["files"].as<JsonArray>()) {
-        const char* const fileName = fileObj["name"] | "";
-        uint8_t pointSize = 0;
-        if (!parseManifestPointSize(fileName, pointSize)) {
-          LOG_ERR("FONT", "Malformed manifest file entry: invalid filename %s", fileName);
-          errorMessage_ = "Invalid font manifest";
-          return false;
-        }
-        if (CrossPointSettings::isSdFontPointSizeAllowedForRange(pointSize, SETTINGS.sdFontSizeRange)) {
-          stringBytes += strlen(fileName) + 1;
-          ++retainedFileCount;
-          hasAllowedFile = true;
-        }
-      }
-      if (hasAllowedFile) ++retainedFamilyCount;
-    }
-
-    // The catalog is long-lived while this activity is open. Its strings are
-    // therefore one checked allocation, not hundreds of independently grown
-    // std::strings that can leave the next download without a TLS-sized block.
-    manifestStringArena_ = makeUniqueNoThrow<char[]>(stringBytes);
-    if (!manifestStringArena_) {
-      LOG_ERR("FONT", "OOM: %zu-byte font manifest string arena (free=%u maxAlloc=%u)", stringBytes, ESP.getFreeHeap(),
-              ESP.getMaxAllocHeap());
-      errorMessage_ = tr(STR_MEMORY_ERROR);
-      return false;
-    }
-    manifestStringArena_[0] = '\0';
-    manifestStringArenaUsed_ = 1;
-    manifestStringArenaCapacity_ = stringBytes;
-
-    baseUrl_ = doc["baseUrl"] | "";
-    manifestFiles_ = makeUniqueNoThrow<ManifestFile[]>(retainedFileCount);
-    if (retainedFileCount > 0 && !manifestFiles_) {
-      LOG_ERR("FONT", "OOM: %zu-entry font manifest file table (free=%u maxAlloc=%u)", retainedFileCount,
-              ESP.getFreeHeap(), ESP.getMaxAllocHeap());
-      errorMessage_ = tr(STR_MEMORY_ERROR);
-      return false;
-    }
-    manifestFamilies_ = makeUniqueNoThrow<ManifestFamily[]>(retainedFamilyCount);
-    if (retainedFamilyCount > 0 && !manifestFamilies_) {
-      LOG_ERR("FONT", "OOM: %zu-entry font manifest family table (free=%u maxAlloc=%u)", retainedFamilyCount,
-              ESP.getFreeHeap(), ESP.getMaxAllocHeap());
-      errorMessage_ = tr(STR_MEMORY_ERROR);
-      return false;
-    }
-    size_t parsedFileCount = 0;
-    size_t parsedFamilyCount = 0;
-
-    // ArduinoJson owns a second copy of every manifest string. Consume the
-    // array from the front and remove each family after copying it so those
-    // strings are released before the next catalog entries are filled. Keeping
-    // the whole JSON tree alive here can exhaust the heap partway through the
-    // list.
-    while (!familiesArr.isNull() && familiesArr.size() > 0) {
-      JsonObject fObj = familiesArr[0];
-      ManifestFamily family;
-      if (!internManifestString(fObj["name"] | "", family.name) ||
-          !internManifestString(fObj["description"] | "", family.description) ||
-          !internManifestString(fObj["languages"] | "", family.languages)) {
-        errorMessage_ = "Invalid font manifest";
-        return false;
-      }
-
-      family.fileStart = parsedFileCount;
-      family.totalSize = 0;
-      JsonArray filesArr = fObj["files"].as<JsonArray>();
-      for (JsonObject fileObj : filesArr) {
-        ManifestFile file;
-        const char* const fileName = fileObj["name"] | "";
-        if (!parseManifestPointSize(fileName, file.pointSize)) {
-          LOG_ERR("FONT", "Malformed manifest file entry: invalid filename %s", fileName);
-          errorMessage_ = "Invalid font manifest";
-          return false;
-        }
-
-        if (!CrossPointSettings::isSdFontPointSizeAllowedForRange(file.pointSize, SETTINGS.sdFontSizeRange)) {
-          continue;
-        }
-
-        if (!internManifestString(fileName, file.name)) {
-          errorMessage_ = "Invalid font manifest";
-          return false;
-        }
-        file.size = fileObj["size"] | 0;
-
-        if (!fileObj["crc32"].is<uint32_t>()) {
-          LOG_ERR("FONT", "Malformed manifest file entry: missing or invalid crc32 for %s", file.name);
-          errorMessage_ = "Invalid font manifest";
-          return false;
-        }
-        file.crc32 = fileObj["crc32"].as<uint32_t>();
-
-        family.totalSize += file.size;
-        manifestFiles_[parsedFileCount++] = file;
-      }
-      family.fileCount = parsedFileCount - family.fileStart;
-
-      if (family.fileCount == 0) {
-        familiesArr.remove(0);
-        continue;
-      }
-
-      manifestFamilies_[parsedFamilyCount++] = std::move(family);
-      familiesArr.remove(0);
-    }
-    manifestFamilyCount_ = parsedFamilyCount;
-  }  // JsonDocument freed here, before the registry is loaded below.
+  }
+  removeTemps();
+  manifestFamilyCount_ = counts.parsedFamilies;
+  LOG_DBG("FONT", "Manifests: upstream %s, CrossIndix %s, %zu families", present[0] ? "ok" : "missing",
+          present[1] ? "ok" : "missing", manifestFamilyCount_);
 
   // Second pass: load the installed-font registry and resolve installed/update
   // state now that the manifest JsonDocument has been released, keeping peak
@@ -844,7 +897,7 @@ void FontDownloadActivity::downloadFamily(ManifestFamily& family) {
       }
     }
 
-    std::string url = buildFontDownloadUrl(baseUrl_, file.name);
+    std::string url = buildFontDownloadUrl(baseUrls_[family.source], file.name);
 
     HttpDownloader::DownloadOptions downloadOptions;
     downloadOptions.preservePartial = true;

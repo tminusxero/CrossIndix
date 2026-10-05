@@ -12,6 +12,7 @@
 #include "SdCardFont.h"
 #include "activities/Activity.h"
 #include "activities/ScreenTransitionRefresh.h"
+#include "network/HttpDownloader.h"
 #include "util/ButtonNavigator.h"
 
 struct Rect;
@@ -21,6 +22,16 @@ struct Rect;
 // firmware-side copy must be bumped manually when the firmware is updated to
 // support a new manifest schema.
 #define FONTS_MANIFEST_VERSION 1
+
+// Manage Fonts shows one list from two manifests: CrossInk's own catalog first
+// (Latin, Greek, Cyrillic and other families, served from its S3 bucket over plain
+// HTTP as upstream does), then the CrossIndix families. A CrossIndix family wins
+// over an upstream family of the same name. Either source may be unreachable;
+// the list is shown as long as one loads. The upstream path is pinned to the
+// font format CrossInk publishes (b4); this firmware loads versions 4 to 6.
+#ifndef FONT_MANIFEST_URL_UPSTREAM
+#define FONT_MANIFEST_URL_UPSTREAM "http://crossink-fonts.s3.us-east-1.amazonaws.com/sd-fonts-m1-b4/fonts.json"
+#endif
 
 #ifndef FONT_MANIFEST_URL
 // CrossIndix font manifest: the rolling "fonts" release of tminusxero/CrossIndix,
@@ -61,6 +72,8 @@ class FontDownloadActivity : public Activity {
     ERROR,
   };
 
+  static constexpr size_t kManifestSourceCount = 2;  // 0 = upstream CrossInk, 1 = CrossIndix
+
   struct ManifestFile {
     // The downloaded manifest can contain hundreds of file names. They all
     // point into manifestStringArena_ so the catalog does not fragment the
@@ -81,6 +94,17 @@ class FontDownloadActivity : public Activity {
     size_t totalSize = 0;
     bool installed = false;
     bool hasUpdate = false;
+    uint8_t source = 0;  // index into baseUrls_
+  };
+
+  // Sizes gathered by the counting pass over every manifest, then consumed by
+  // the fill pass; both passes run parseManifestSource.
+  struct ManifestCounts {
+    size_t stringBytes = 1;  // A stable address for every empty manifest string.
+    size_t familyCount = 0;
+    size_t fileCount = 0;
+    size_t parsedFamilies = 0;
+    size_t parsedFiles = 0;
   };
 
   State state_ = WIFI_SELECTION;
@@ -89,7 +113,7 @@ class FontDownloadActivity : public Activity {
   ButtonNavigator buttonNavigator_;
 
   // Manifest data
-  std::string baseUrl_;
+  std::string baseUrls_[kManifestSourceCount];
   // One activity-owned allocation for all manifest labels and file names.
   // It remains alive while an update batch uses a copied ManifestFamily.
   std::unique_ptr<char[]> manifestStringArena_;
@@ -145,6 +169,16 @@ class FontDownloadActivity : public Activity {
 
   void onWifiSelectionComplete(bool success);
   bool fetchAndParseManifest();
+  // Downloads one manifest to path. Returns false when it could not be fetched;
+  // sets cancelled when the user backed out, which ends the whole load.
+  bool downloadManifestSource(const char* url, const char* path, HttpDownloader::DownloadOptions& options,
+                              bool& cancelled);
+  // One pass over a downloaded manifest: with fill=false it sizes the catalog
+  // (counts), with fill=true it copies families and files into the tables.
+  // Families whose name is in skipNames are left out (upstream entries that
+  // CrossIndix replaces). Returns false on a malformed manifest.
+  bool parseManifestSource(const char* path, uint8_t source, const std::vector<std::string>* skipNames, bool fill,
+                           ManifestCounts& counts);
   bool internManifestString(const char* text, const char*& out);
   bool rebuildListItems();
   const SdCardFontFamilyInfo* findInstalledFamilyCandidate(const char* familyName) const;
