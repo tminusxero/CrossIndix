@@ -4,25 +4,53 @@
 #include <HalStorage.h>
 #include <Logging.h>
 #include <MemoryBudget.h>
+#include <SdCardFont.h>
+#include <Utf8.h>
 
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 
 #include "CrossPointSettings.h"
 #include "fontIds.h"
 
 namespace {
-
 struct UiFontSize {
   int fontId;
   uint8_t pointSize;
 };
 
+// Built-in UI font ids and their point sizes. Script fallback fonts are
+// loaded at exactly these sizes so foreign-script strings sit at the same
+// size as the Latin UI text around them. Reader sizes are a separate matter.
 constexpr UiFontSize kUiFontSizes[] = {
     {SMALL_FONT_ID, 8},
     {UI_10_FONT_ID, 10},
     {UI_12_FONT_ID, 12},
 };
+constexpr uint8_t kUiFontSizeCount = static_cast<uint8_t>(std::size(kUiFontSizes));
+static_assert(kUiFontSizeCount == ScriptUiFontCache::kSizes, "cache slots must match UI sizes");
+
+int uiSizeIndexFor(const int primaryFontId) {
+  for (uint8_t i = 0; i < kUiFontSizeCount; i++) {
+    if (kUiFontSizes[i].fontId == primaryFontId) return i;
+  }
+  return -1;
+}
+
+// First script block in `text` that the built-in UI fonts lack, ignoring the
+// shared Indic dandas. None when the string is Latin/Cyrillic/... only.
+ScriptBlock firstFallbackScript(const char* text) {
+  if (!text) return ScriptBlock::None;
+  const auto* p = reinterpret_cast<const unsigned char*>(text);
+  uint32_t cp;
+  while ((cp = utf8NextCodepoint(&p))) {
+    if (isIndicDanda(cp)) continue;
+    const ScriptBlock b = scriptBlockOf(cp);
+    if (b != ScriptBlock::None) return b;
+  }
+  return ScriptBlock::None;
+}
 
 enum class FontFileSelection : uint8_t { Closest, Exact };
 
@@ -108,13 +136,17 @@ void SdCardFontSystem::begin(GfxRenderer& renderer) {
     return static_cast<SdCardFontSystem*>(ctx)->resolveFontId(familyName, pointSize);
   };
   SETTINGS.sdFontResolverCtx = this;
+  renderer_ = &renderer;
 
-  if (SETTINGS.sdFontFamilyName[0] == '\0') {
-    LOG_DBG("SDFS", "SD font resolver ready; discovery deferred until requested");
-    return;
-  }
+  int primaries[kUiFontSizeCount];
+  for (uint8_t i = 0; i < kUiFontSizeCount; i++) primaries[i] = kUiFontSizes[i].fontId;
+  renderer.setFallbackResolver(&SdCardFontSystem::resolveUiFontTrampoline, this, primaries, kUiFontSizeCount);
 
-  ensureLoaded(renderer);
+  // Index which installed family covers which script before the first UI
+  // string is drawn, whether or not a reader family is selected: file names
+  // and titles in the browser must not depend on the reader font.
+  ensureRegistry();
+  if (SETTINGS.sdFontFamilyName[0] != '\0') ensureLoaded(renderer);
   releaseRegistry();
 }
 
@@ -133,6 +165,7 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
   // contents on disk may have changed (e.g. user re-uploaded a new build).
   bool registryWasDirty = registryDirty_.load(std::memory_order_acquire) || fontReloadPending_ ||
                           loadedRegistryRevision_ != registry_.revision();
+  uiFallbackSuspended_ = false;
 
   const char* wantedFamily = SETTINGS.sdFontFamilyName;
   const std::string& currentFamily = manager_.currentFamilyName();
@@ -178,7 +211,7 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
       LOG_DBG("SDFS", "SD font family disappeared: %s (clearing)", wantedFamily);
       manager_.unloadAll(renderer);
       SETTINGS.sdFontFamilyName[0] = '\0';
-      persistSettingsChange();
+      if (!transientFontLoad_) persistSettingsChange();
       return;
     }
     const auto* wantedFile = family->findClosestFile(targetPointSize);
@@ -197,28 +230,50 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
       loadedFontPointSize_ = targetPointSize;
       fontReloadPending_ = false;
       loadedRegistryRevision_ = registry_.revision();
-      setupUiFallbacks(renderer);
       LOG_DBG("SDFS", "Loaded SD font family: %s", wantedFamily);
     } else {
       LOG_ERR("SDFS", "Failed to load SD font family: %s (clearing)", wantedFamily);
       SETTINGS.sdFontFamilyName[0] = '\0';
-      persistSettingsChange();
+      if (!transientFontLoad_) persistSettingsChange();
     }
   } else {
     LOG_DBG("SDFS", "SD font family not found: %s (clearing)", wantedFamily);
     SETTINGS.sdFontFamilyName[0] = '\0';
-    persistSettingsChange();
+    if (!transientFontLoad_) persistSettingsChange();
   }
 }
 
 void SdCardFontSystem::releaseLoadedFont(GfxRenderer& renderer) {
+  // UI script fonts are dropped too; they come back lazily on the next
+  // foreign-script string (guarded by the heap check in uiFontFor).
+  dropUiFonts(renderer);
   if (manager_.currentFamilyName().empty()) return;
 
   const std::string familyName = manager_.currentFamilyName();
-  (void)familyName;
   manager_.unloadAll(renderer);
   loadedFontPointSize_ = 0;
   LOG_DBG("SDFS", "Released SD card font before low-memory operation: %s", familyName.c_str());
+}
+
+void SdCardFontSystem::dropUiFonts(GfxRenderer& renderer) {
+  ScriptUiFontCache::Entry dropped[ScriptUiFontCache::kMaxEntries];
+  const uint8_t n = uiCache_.releaseAll(dropped);
+  for (uint8_t i = 0; i < n; i++) manager_.unloadUiFamily(dropped[i].family, renderer);
+  manager_.unloadAllUiFonts(renderer);
+}
+
+void SdCardFontSystem::dropUiFamiliesForBook(GfxRenderer& renderer) {
+  ScriptUiFontCache::Entry dropped[ScriptUiFontCache::kMaxEntries];
+  const uint8_t n = uiCache_.releaseAllExcept(manager_.currentFamilyName().c_str(), dropped);
+  for (uint8_t i = 0; i < n; i++) {
+    LOG_DBG("SDFS", "Book open: unloading UI script family %s", dropped[i].family);
+    manager_.unloadUiFamily(dropped[i].family, renderer);
+  }
+}
+
+void SdCardFontSystem::suspendUiFallbacks(GfxRenderer& renderer) {
+  dropUiFonts(renderer);
+  uiFallbackSuspended_ = true;
 }
 
 void SdCardFontSystem::ensureRegistry() {
@@ -234,6 +289,168 @@ void SdCardFontSystem::ensureRegistry() {
     return;
   }
   registryLoaded_ = true;
+  // The script index survives releaseRegistry(); rebuild it only the first
+  // time and when files were added, replaced or removed, in which case the
+  // resident UI fonts could point at stale content and are dropped too.
+  if (scriptIndexBuilt_ && !dirty) return;
+  if (dirty && renderer_) dropUiFonts(*renderer_);
+  rebuildScriptIndex();
+  scriptIndexBuilt_ = true;
+}
+
+void SdCardFontSystem::rebuildScriptIndex() {
+  std::memset(scriptFamilies_, 0, sizeof(scriptFamilies_));
+  std::memset(scriptUiSizes_, 0, sizeof(scriptUiSizes_));
+
+  // Probe every script letter except None in one pass per family.
+  constexpr uint8_t probeCount = kScriptCount - 1;
+  uint32_t probes[probeCount];
+  for (uint8_t i = 0; i < probeCount; i++) probes[i] = kScriptProbe[i + 1];
+
+  for (const auto& family : registry_.getFamilies()) {
+    uint8_t sizesMask = 0;
+    std::string probePath;
+    for (uint8_t i = 0; i < kUiFontSizeCount; i++) {
+      const auto* file = family.findFile(kUiFontSizes[i].pointSize);  // loads the family's file list
+      if (!file) continue;
+      sizesMask |= static_cast<uint8_t>(1u << i);
+      probePath = file->path;  // largest installed UI size
+    }
+    // The file list is only needed here; the registry stays names-only until
+    // a family is loaded (ensureLoaded re-reads the details it needs).
+    family.releaseDetails();
+    if (sizesMask == 0) continue;
+
+    const uint32_t hits = SdCardFont::probeCoverage(probePath.c_str(), probes, probeCount);
+    if (hits == 0) continue;
+    const bool isReaderFamily = family.name == SETTINGS.sdFontFamilyName;
+    for (uint8_t i = 0; i < probeCount; i++) {
+      if (!(hits & (1u << i))) continue;
+      const uint8_t block = i + 1;
+      if (scriptFamilies_[block][0] != '\0' && !isReaderFamily) continue;
+      std::strncpy(scriptFamilies_[block], family.name.c_str(), ScriptUiFontCache::kFamilyNameLen - 1);
+      scriptUiSizes_[block] = sizesMask;
+    }
+  }
+  for (uint8_t b = 1; b < kScriptCount; b++) {
+    if (scriptFamilies_[b][0] != '\0') {
+      LOG_DBG("SDFS", "UI fallback script %u -> %s (sizes 0x%x)", b, scriptFamilies_[b], scriptUiSizes_[b]);
+    }
+  }
+}
+
+const char* SdCardFontSystem::familyForScript(const ScriptBlock block) const {
+  const uint8_t b = static_cast<uint8_t>(block);
+  return b < kScriptCount ? scriptFamilies_[b] : "";
+}
+
+int SdCardFontSystem::resolveUiFontTrampoline(void* ctx, const uint8_t block, const int primaryFontId) {
+  auto* self = static_cast<SdCardFontSystem*>(ctx);
+  if (!self || !self->renderer_ || block >= kScriptCount) return 0;
+  return self->uiFontFor(static_cast<ScriptBlock>(block), primaryFontId, *self->renderer_);
+}
+
+int SdCardFontSystem::uiFontFor(const ScriptBlock block, const int primaryFontId, GfxRenderer& renderer) {
+  if (uiFallbackSuspended_) return 0;
+  const uint8_t b = static_cast<uint8_t>(block);
+  if (b == 0 || b >= kScriptCount) return 0;
+  const int sizeIndex = uiSizeIndexFor(primaryFontId);
+  if (sizeIndex < 0) return 0;
+  const char* family = scriptFamilies_[b];
+  if (family[0] == '\0' || !(scriptUiSizes_[b] & (1u << sizeIndex))) return 0;
+  const uint8_t pointSize = kUiFontSizes[sizeIndex].pointSize;
+
+  // The reader family loaded at this exact size serves as-is.
+  if (const int readerId = manager_.readerFontIdAt(family, pointSize)) return readerId;
+
+  ScriptUiFontCache::Entry* entry = uiCache_.touch(family);
+  if (entry) {
+    const int id = entry->fontIds[sizeIndex];
+    if (id != 0 && renderer.getFontMap().count(id) != 0) {
+      uiCache_.touchSize(*entry, sizeIndex);
+      return id;
+    }
+    entry->fontIds[sizeIndex] = 0;  // unloaded elsewhere (reader adopted then released)
+  }
+
+  // Make room by heap, not by a family count: unload the least recently drawn
+  // UI font sizes (other than this one) while free heap is short.
+  auto heap = MemoryBudget::snapshot();
+  ScriptUiFontCache::Victim victim;
+  while ((heap.freeHeap < MemoryBudget::UI_SD_FONT_EVICT_BELOW_FREE ||
+          heap.maxAllocHeap < MemoryBudget::UI_SD_FONT_MIN_MAX_ALLOC) &&
+         uiCache_.leastRecentlyUsedSize(family, sizeIndex, victim)) {
+    LOG_DBG("SDFS", "Low heap (free=%u): unloading UI font %s size %d", heap.freeHeap, victim.family, victim.sizeIndex);
+    manager_.unloadUiFont(victim.fontId, renderer);
+    uiCache_.clearSize(victim.family, victim.sizeIndex);
+    heap = MemoryBudget::snapshot();
+  }
+  entry = uiCache_.touch(family);  // clearSize may have dropped this family's entry
+
+  if (heap.freeHeap < MemoryBudget::UI_SD_FONT_MIN_FREE || heap.maxAllocHeap < MemoryBudget::UI_SD_FONT_MIN_MAX_ALLOC) {
+    if (!uiHeapWarned_) {
+      LOG_DBG("SDFS", "Low heap for UI font %s %u pt (free=%u maxAlloc=%u); leaving replacement glyphs", family,
+              pointSize, heap.freeHeap, heap.maxAllocHeap);
+      uiHeapWarned_ = true;
+    }
+    return 0;
+  }
+  uiHeapWarned_ = false;
+
+  char path[160] = {};
+  uint8_t selected = 0;
+  if (!findInstalledFontFile(family, pointSize, FontFileSelection::Exact, path, sizeof(path), selected)) {
+    LOG_DBG("SDFS", "UI font file missing: %s %u pt", family, pointSize);
+    scriptUiSizes_[b] &= static_cast<uint8_t>(~(1u << sizeIndex));
+    return 0;
+  }
+
+  if (!entry) {
+    ScriptUiFontCache::Entry evicted;
+    entry = &uiCache_.acquire(family, evicted);
+    if (evicted.used) {
+      LOG_DBG("SDFS", "Evicting UI script family %s", evicted.family);
+      manager_.unloadUiFamily(evicted.family, renderer);
+    }
+  }
+  const int id = manager_.loadUiFont(path, family, pointSize, renderer);
+  entry->fontIds[sizeIndex] = id;
+  if (id != 0) uiCache_.touchSize(*entry, sizeIndex);
+  if (id != 0) LOG_DBG("SDFS", "UI script font ready: %s %u pt (script %u)", family, pointSize, b);
+  return id;
+}
+
+bool SdCardFontSystem::ensureReaderFontCovers(GfxRenderer& renderer, const char* text) {
+  const ScriptBlock block = firstFallbackScript(text);
+  if (block == ScriptBlock::None) return true;
+  const uint32_t probe = scriptProbe(block);
+
+  const auto readerIt = renderer.getFontMap().find(SETTINGS.getReaderFontId());
+  if (readerIt != renderer.getFontMap().end() && readerIt->second.hasCodepoint(probe)) return true;
+
+  const char* family = familyForScript(block);
+  if (family[0] == '\0') {
+    LOG_DBG("SDFS", "No installed family covers script %u of the book title", static_cast<uint8_t>(block));
+    return false;
+  }
+  if (std::strcmp(SETTINGS.sdFontFamilyName, family) == 0) return false;  // selected but not loadable
+
+  LOG_INF("SDFS", "Reader font lacks script %u; using %s for this book", static_cast<uint8_t>(block), family);
+  char previous[sizeof(SETTINGS.sdFontFamilyName)];
+  std::memcpy(previous, SETTINGS.sdFontFamilyName, sizeof(previous));
+  std::strncpy(SETTINGS.sdFontFamilyName, family, sizeof(SETTINGS.sdFontFamilyName) - 1);
+  SETTINGS.sdFontFamilyName[sizeof(SETTINGS.sdFontFamilyName) - 1] = '\0';
+  transientFontLoad_ = true;
+  ensureLoaded(renderer);
+  transientFontLoad_ = false;
+  if (manager_.currentFamilyName() == family) return true;
+  // The load failed and ensureLoaded cleared the name: that was this book's
+  // try, not the user's setting, so the chosen family comes back (it is
+  // reloaded on the next ensureLoaded).
+  std::memcpy(SETTINGS.sdFontFamilyName, previous, sizeof(previous));
+  LOG_ERR("SDFS", "Could not load %s for the book title; keeping %s", family,
+          previous[0] ? previous : "the built-in font");
+  return false;
 }
 
 void SdCardFontSystem::releaseRegistry() {
@@ -244,70 +461,11 @@ void SdCardFontSystem::releaseRegistry() {
 }
 
 void SdCardFontSystem::releaseForNetwork(GfxRenderer& renderer) {
+  suspendUiFallbacks(renderer);
   releaseLoadedFont(renderer);
 
   releaseRegistry();
   registryDirty_.store(true, std::memory_order_release);
-}
-
-void SdCardFontSystem::setupUiFallbacks(GfxRenderer& renderer) {
-  const std::string& familyName = manager_.currentFamilyName();
-  if (familyName.empty()) return;
-
-  const auto* family = registry_.findFamily(familyName);
-  if (!family) return;
-
-  const auto readerIt = renderer.getFontMap().find(manager_.getFontId(familyName));
-  if (readerIt == renderer.getFontMap().end()) return;
-
-  static constexpr uint32_t kCjkProbes[] = {0x4E00, 0x3042, 0x30A2, 0xAC00};
-  bool hasCjk = false;
-  for (const uint32_t cp : kCjkProbes) {
-    if (readerIt->second.hasCodepoint(cp)) {
-      hasCjk = true;
-      break;
-    }
-  }
-  if (!hasCjk) {
-    LOG_DBG("SDFS", "%s has no CJK coverage - skipping UI fallback sizes", familyName.c_str());
-    return;
-  }
-
-  for (const auto& ui : kUiFontSizes) {
-    const int sdFontId = manager_.loadFamilyExtraSize(*family, renderer, ui.pointSize);
-    if (sdFontId != 0) {
-      renderer.setFallbackFont(ui.fontId, sdFontId);
-    } else {
-      LOG_DBG("SDFS", "No %u pt SD glyphs for UI fallback in %s", ui.pointSize, familyName.c_str());
-    }
-  }
-}
-
-void SdCardFontSystem::setupUiFallbacksDirect(GfxRenderer& renderer, const char* familyName) {
-  if (!familyName || familyName[0] == '\0') return;
-
-  const auto readerIt = renderer.getFontMap().find(manager_.getFontId(manager_.currentFamilyName()));
-  if (readerIt == renderer.getFontMap().end()) return;
-
-  static constexpr uint32_t kCjkProbes[] = {0x4E00, 0x3042, 0x30A2, 0xAC00};
-  bool hasCjk = false;
-  for (const uint32_t cp : kCjkProbes) {
-    if (readerIt->second.hasCodepoint(cp)) {
-      hasCjk = true;
-      break;
-    }
-  }
-  if (!hasCjk) return;
-
-  for (const auto& ui : kUiFontSizes) {
-    char path[160] = {};
-    uint8_t pointSize = 0;
-    if (!findInstalledFontFile(familyName, ui.pointSize, FontFileSelection::Exact, path, sizeof(path), pointSize)) {
-      continue;
-    }
-    const int sdFontId = manager_.loadFamilyExtraFile(path, familyName, pointSize, renderer);
-    if (sdFontId != 0) renderer.setFallbackFont(ui.fontId, sdFontId);
-  }
 }
 
 int SdCardFontSystem::resolveFontId(const char* familyName, uint8_t /*pointSize*/) const {
@@ -419,8 +577,8 @@ DictionaryFontActivation SdCardFontSystem::activateDictionaryFont(GfxRenderer& r
     return {readerFontId, false};
   }
 
-  // unloadAll() also drops optional CJK UI sizes before the dictionary file is
-  // allocated, so both families are never resident at once.
+  // Drop the reader family before the dictionary file is allocated, so both
+  // reader families are never resident at once.
   if (!manager_.currentFamilyName().empty()) {
     manager_.unloadAll(renderer);
   }
@@ -467,7 +625,6 @@ int SdCardFontSystem::restoreReaderFont(GfxRenderer& renderer) {
       return SETTINGS.getBuiltInReaderFontId();
     }
     loadedFontPointSize_ = SETTINGS.getSdFontTargetPointSize();
-    setupUiFallbacksDirect(renderer, familyName);
   }
 
   const int fontId = manager_.getFontId(manager_.currentFamilyName());

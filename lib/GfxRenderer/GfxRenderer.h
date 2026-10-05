@@ -194,7 +194,8 @@ class GfxRenderer {
   void setFallbackResolver(FallbackResolverFn fn, void* ctx, const int* primaryIds, uint8_t count) {
     fallbackResolver_ = fn;
     fallbackResolverCtx_ = ctx;
-    for (uint8_t i = 0; i < kMaxFallbackPrimaries; i++) fallbackPrimaryIds_[i] = i < count ? primaryIds[i] : 0;
+    for (uint8_t i = 0; i < kMaxFallbackPrimaries; i++)
+      fallbackPrimaryIds_[i] = (primaryIds && i < count) ? primaryIds[i] : 0;
   }
   void clearFallbackResolver() { setFallbackResolver(nullptr, nullptr, nullptr, 0); }
   // Ensure SD card font glyph data is loaded for the given text. Called from layout code

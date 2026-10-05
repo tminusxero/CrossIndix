@@ -1,5 +1,8 @@
 #pragma once
 
+#include <BoardConfig.h>
+#include <ScriptBlock.h>
+#include <ScriptUiFontCache.h>
 #include <SdCardFontManager.h>
 #include <SdCardFontRegistry.h>
 
@@ -48,8 +51,44 @@ class SdCardFontSystem {
   void releaseForNetwork(GfxRenderer& renderer);
 
   /// Ensure the font catalog is available for settings/web enumeration, including
-  /// newly uploaded or deleted fonts visible in the web UI.
+  /// newly uploaded or deleted fonts visible in the web UI. Re-indexes which
+  /// installed family covers which script after every discovery.
   void ensureRegistry();
+
+  /// SD font id to draw a UI string in script `block` at the size of the
+  /// built-in UI font `primaryFontId` (SMALL/UI_10/UI_12). Loads the file
+  /// lazily; before a load, least recently drawn UI fonts are unloaded while free
+  /// heap is under MemoryBudget::UI_SD_FONT_EVICT_BELOW_FREE.
+  /// Returns 0 when no installed family covers the script, the size is not
+  /// installed, fallbacks are suspended, or the heap is too low.
+  int uiFontFor(ScriptBlock block, int primaryFontId, GfxRenderer& renderer);
+
+  /// Family indexed for `block` ("" when none). Names survive releaseRegistry().
+  const char* familyForScript(ScriptBlock block) const;
+
+  /// On a book open, unload the UI script families other than the reader's own
+  /// family: a family kept for the library list (Bengali titles while reading a
+  /// Hindi book) would hold its cluster table and font objects through layout,
+  /// where the heap is tightest. They reload lazily when a screen needs them.
+  /// Same on every device.
+  void dropUiFamiliesForBook(GfxRenderer& renderer);
+
+  /// Drop resident UI script fonts and stop lazy loading until
+  /// resumeUiFallbacks(). Used around network/TLS work.
+  void suspendUiFallbacks(GfxRenderer& renderer);
+  void resumeUiFallbacks() { uiFallbackSuspended_ = false; }
+
+  /// Make sure the active reader font can draw the script of `text` (a book
+  /// title). When it cannot and an installed family covers that script, that
+  /// family is selected for this reader session (SETTINGS.sdFontFamilyName is
+  /// changed in memory only; the per-book restore on exit puts the global
+  /// value back). Returns false when the text stays uncovered.
+  bool ensureReaderFontCovers(GfxRenderer& renderer, const char* text);
+
+  // Families that can be resident for UI script fallback at once: the slot
+  // count only. What actually stays is decided by free heap in uiFontFor(),
+  // the same on every device (MemoryBudget::UI_SD_FONT_EVICT_BELOW_FREE).
+  static constexpr uint8_t kMaxResidentUiFamilies = ScriptUiFontCache::kMaxEntries;
 
   /// Release catalog names and paths without unloading the active reader font.
   void releaseRegistry();
@@ -99,13 +138,13 @@ class SdCardFontSystem {
  private:
   void persistSettingsChange() const;
 
-  // Load the active SD family at the built-in UI point sizes and register each
-  // as a size-matched CJK fallback for the corresponding UI font, so CJK book
-  // titles/list rows render at the same size as the surrounding Latin UI text.
-  // No-op when no SD family is loaded. Safe to call repeatedly (sizes already
-  // loaded are reused).
-  void setupUiFallbacks(GfxRenderer& renderer);
-  void setupUiFallbacksDirect(GfxRenderer& renderer, const char* familyName);
+  // Fill scriptFamilies_/scriptUiSizes_ from the loaded registry: for every
+  // family that ships at least one built-in UI size, probe the script letters
+  // of ScriptBlock.h against its interval table (no font load). The first
+  // family covering a script wins; the reader family always wins its scripts.
+  void rebuildScriptIndex();
+  void dropUiFonts(GfxRenderer& renderer);
+  static int resolveUiFontTrampoline(void* ctx, uint8_t block, int primaryFontId);
 
   SdCardFontRegistry registry_;
   SdCardFontManager manager_;
@@ -116,6 +155,18 @@ class SdCardFontSystem {
   uint32_t loadedRegistryRevision_ = 0;
   SettingsPersistenceCallback settingsPersistenceCallback_ = nullptr;
   void* settingsPersistenceContext_ = nullptr;
+
+  static constexpr uint8_t kScriptCount = static_cast<uint8_t>(ScriptBlock::COUNT);
+  char scriptFamilies_[kScriptCount][ScriptUiFontCache::kFamilyNameLen] = {};
+  uint8_t scriptUiSizes_[kScriptCount] = {};  // bit i = kUiFontSizes[i] installed
+  ScriptUiFontCache uiCache_{kMaxResidentUiFamilies};
+  GfxRenderer* renderer_ = nullptr;
+  bool uiFallbackSuspended_ = false;
+  bool scriptIndexBuilt_ = false;
+  bool uiHeapWarned_ = false;
+  // Set while ensureReaderFontCovers() tries a family for one book: a failed
+  // load must not persist the cleared name over the user's choice.
+  bool transientFontLoad_ = false;
 };
 
 // Global SD card font system instance (defined in main.cpp).
