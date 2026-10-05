@@ -1230,7 +1230,7 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
     return;
   }
 
-  // Route CJK/Bengali-bearing strings to the fallback font when the requested
+  // Route CJK/Indic-bearing strings to the fallback font when the requested
   // font lacks the glyphs (e.g. Chinese book titles drawn with a Latin UI font).
   const int resolvedFontId = resolveTextFontId(fontId, text, style);
   const auto fontIt = fontMap.find(resolvedFontId);
@@ -1241,7 +1241,7 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
   const auto& font = fontIt->second;
 
   // Prewarm and draw the exact codepoints of the visual stream: Arabic shaping
-  // replaces logical characters with presentation forms and Bengali shaping
+  // replaces logical characters with presentation forms and Indic shaping
   // with cluster glyphs; recording the input text left those glyphs cold and
   // produced replacement diamonds when the SD font's on-demand path was under
   // memory pressure.

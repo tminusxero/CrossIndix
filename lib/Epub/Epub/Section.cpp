@@ -24,20 +24,13 @@ constexpr uint32_t SECTION_CACHE_MAGIC = 0x535843FF;  // bytes: 0xFF, "CXS"
 // must rebuild together.
 // v63: Paragraph base direction excludes direction changes from inline elements.
 // v66: Internal EPUB links preserve CSS superscript/subscript positioning.
-// v67: Bengali text is shaped (cluster glyphs, vowel reordering, zero-advance
-//      marks) in both measurement and drawing; cached Bengali word positions
-//      from v66 no longer match.
-// v68: Bengali vowel-sign context forms (word-initial/final, sized, fused).
-// v69: Indic cluster-table kinds 2..10 and the PUA mark classes F200/F300 are
-//      zero-advance overlays; fonts of the other Indic scripts lay out
-//      differently from the unshaped v68 caches once their shapers land.
-// v71: words spanning a parser read boundary are no longer split into two tokens.
-// v128: CrossIndix numbers its cache from 128 upwards so it never collides with
-//       upstream CrossInk (66 on v1.5.1, 76 on development in 2026-09); a cache written
-//       by either firmware is rejected by the other. 0xF6 stays the partial marker.
-// v1.6.0 merge (2026-09-24): upstream's v75-v77 layout changes (HTML hidden, no
-//       synthetic indent, ordered lists) are included without a bump, by decision:
-//       caches written by a 1.5.1-based CrossIndix build are reused as they are.
+// v128: CrossIndix. Shaped Indic text (cluster glyphs, vowel-sign reordering and
+//       context forms, zero-advance marks, danda spacing) and the parser's
+//       read-boundary fix change word positions, so caches written by CrossInk
+//       cannot be reused. CrossIndix numbers its cache from 128 upwards: it never
+//       collides with upstream CrossInk's numbering (76 at v1.6.0, 80 at v1.6.1),
+//       and a cache written by either firmware is rejected by the other. The
+//       partial marker 0xF6 is kept apart from upstream's for the same reason.
 constexpr uint8_t SECTION_FILE_VERSION = 128;
 // Suspended incremental build: valid pages plus LUTs and a parse-watermark trailer.
 // Change this with layout or payload changes so stale partial pages cannot resume

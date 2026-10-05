@@ -702,7 +702,7 @@ bool SdCardFont::load(const char* path) {
     s.header.kernRightClassCount = tocBuf[22];
     s.header.ligaturePairCount = tocBuf[23];
     s.header.is2Bit = is2Bit;
-    // Script cluster table (Bengali shaping). These bytes were reserved zeros
+    // Script cluster table (Lipi shaping). These bytes were reserved zeros
     // before the table existed, so fonts without one read as "no shaping".
     s.header.shapeKind = tocBuf[1];
     s.header.shapeEntryCount = readU16(tocBuf + 2);

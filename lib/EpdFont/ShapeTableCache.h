@@ -7,9 +7,10 @@
 ///
 /// Every SdCardFont instance of a family (one per point size, plus the UI
 /// fallback sizes) loads its own copy of the table, and those copies are
-/// byte-identical: the builder derives the table from the font's OpenType
-/// data, not from the size. Sharing by content keeps one copy resident per
-/// distinct table. Entries are matched by length, kind, hash and a full
+/// normally byte-identical: the builder derives the table from the font's
+/// OpenType data, not from the size. Sharing is by content, so one copy stays
+/// resident per distinct table and a size whose table does differ simply
+/// keeps its own. Entries are matched by length, kind, hash and a full
 /// compare, so two tables that merely hash alike never alias.
 ///
 /// Ownership: acquire() takes the caller's buffer (allocated with new[]) and

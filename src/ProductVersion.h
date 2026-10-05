@@ -1,6 +1,6 @@
 #pragma once
 
-/// The product label shown to the user: "CrossIndix-<version>+<commit> (CrossInk <version>)".
+/// The product label shown to the user: "CrossIndix-<version>[+<commit>] (CrossInk <version>)".
 /// Hardware builds get the pieces from scripts/git_branch.py; simulator and test builds fall
 /// back to the CrossInk version they define directly. Non-release builds add the commit
 /// (CROSSINDIX_BUILD_ID, with "-dirty" when the build tree had uncommitted changes) so a

@@ -291,10 +291,11 @@ typedef struct {
   uint32_t ligaturePairCount;            ///< Number of entries in ligaturePairs
 
   /// Script cluster table written by the font builder (SD-card fonts only,
-  /// nullptr for the built-ins). shapeKind selects the shaper that reads it
-  /// (Lipi::SHAPE_KIND_*); entries are Lipi::entrySizeForKind
-  /// bytes each, sorted for binary search, and stay resident for the font's
-  /// lifetime (a few KB).
+  /// nullptr for the built-ins), in Lipi's packed layout (table format 3: a
+  /// directory, then one bucket of entries per key length; see
+  /// lipi/docs/table-format.md). shapeKind names the script descriptor that
+  /// reads it. Resident for the font's lifetime (a few KB), shared between
+  /// sizes of a family (ShapeTableCache).
   const uint8_t* shapeTable;
   uint16_t shapeEntryCount;
   uint8_t shapeKind;
