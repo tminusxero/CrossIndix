@@ -1,181 +1,123 @@
-name: Compile Release
+name: Release firmware
+
+# A tag v<version> builds the three firmware images from that commit, publishes them as
+# a GitHub release, then builds and attaches the six font folders (release-fonts.yml).
+# The tag must equal the version in platformio.ini [crossindix]. Manual runs build the
+# images as workflow artifacts without publishing.
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
-    inputs:
-      version:
-        description: "Compile release builds"
-        required: true
-        type: string
 
 permissions:
   contents: write
 
+env:
+  PIO_CORE_URL: https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
+
 jobs:
-  prepare-release:
+  version:
     runs-on: ubuntu-latest
     outputs:
-      release_version: ${{ steps.version.outputs.release_version }}
+      version: ${{ steps.v.outputs.version }}
     steps:
       - uses: actions/checkout@v6
-        with:
-          token: ${{ secrets.RELEASE_PAT }}
-          fetch-depth: 0
-
-      - name: Verify release tag is on main
-        if: github.event_name == 'push'
+      - id: v
         run: |
-          git fetch origin main:refs/remotes/origin/main
-          TAG_COMMIT="$(git rev-list -n 1 "$GITHUB_REF_NAME")"
-          git merge-base --is-ancestor "$TAG_COMMIT" origin/main
-
-      - name: Resolve release version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ inputs.version }}"
-          else
-            VERSION="${GITHUB_REF_NAME#v}"
+          VERSION=$(python3 -c "import configparser; c = configparser.ConfigParser(); c.read('platformio.ini'); print(c['crossindix']['version'])")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "push" ] && [ "${GITHUB_REF_NAME#v}" != "$VERSION" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match platformio.ini version $VERSION"; exit 1
           fi
-          VERSION="${VERSION#v}"
-          echo "release_version=$VERSION" >> "$GITHUB_OUTPUT"
 
-  build-release:
-    needs: prepare-release
+  build:
+    needs: version
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
           - environment: default
-            firmware: firmware-x3-x4
-          - environment: sticky
-            firmware: firmware-sticky
+            target: x3-x4
           - environment: x4-pro
-            firmware: firmware-x4-pro
+            target: x4-pro
           - environment: x4-classic
-            firmware: firmware-x4-classic
+            target: x4-classic
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
-
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: "3.14"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
+      - uses: astral-sh/setup-uv@v7
         with:
           version: "latest"
           enable-cache: true
-
       - name: Cache PlatformIO packages
         uses: actions/cache@v4
         with:
-          # Do not cache PlatformIO's Python virtual environment. It is tied to
-          # the runner's Python and can become invalid when restored elsewhere.
           path: |
             ~/.platformio/packages
             ~/.platformio/platforms
-          key: ${{ runner.os }}-platformio-py3.14-core6.1.19-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
-
+          key: ${{ runner.os }}-platformio-py3.14-core6.1.19-${{ matrix.environment }}-${{ hashFiles('platformio.ini', 'platformio.local.example.ini') }}
       - name: Install PlatformIO Core
-        run: uv pip install --system -U https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip
-
-      - name: Configure release version
+        run: uv pip install --system -U "$PIO_CORE_URL"
+      - name: Build ${{ matrix.environment }}
         env:
-          RELEASE_VERSION: ${{ needs.prepare-release.outputs.release_version }}
+          CROSSINDIX_RELEASE: "1"
         run: |
-          sed -i "/^\[crossink\]$/,/^\[/s/^version = .*/version = $RELEASE_VERSION/" platformio.ini
-
-      - name: Build CrossInk
-        env:
-          CROSSINK_RELEASE_VERSION: ${{ needs.prepare-release.outputs.release_version }}
-        run: pio run -j1 -e ${{ matrix.environment }}
-
-      - name: Upload firmware artifact
-        uses: actions/upload-artifact@v7
+          set -euo pipefail
+          pio run -j1 -e ${{ matrix.environment }} | tee pio-${{ matrix.environment }}.log
+          NAME="crossindix-${{ needs.version.outputs.version }}-${{ matrix.target }}.bin"
+          mkdir -p dist && cp ".pio/build/${{ matrix.environment }}/firmware.bin" "dist/$NAME"
+          {
+            echo "## $NAME"
+            grep -E "CrossIndix label|RAM:\s|Flash:\s" pio-${{ matrix.environment }}.log | while read -r line; do echo "- ${line}"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
         with:
-          name: release-firmware-${{ matrix.environment }}
-          path: .pio/build/${{ matrix.environment }}/${{ matrix.firmware }}-v${{ needs.prepare-release.outputs.release_version }}.bin
+          name: firmware-${{ matrix.target }}
+          path: dist/*.bin
           if-no-files-found: error
 
-  publish-release:
-    needs:
-      - prepare-release
-      - build-release
+  publish:
+    if: github.event_name == 'push'
+    needs: [version, build]
     runs-on: ubuntu-latest
     env:
-      RELEASE_VERSION: ${{ needs.prepare-release.outputs.release_version }}
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
         with:
-          token: ${{ secrets.RELEASE_PAT }}
-          fetch-depth: 0
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.14"
-
-      - name: Download firmware artifacts
-        uses: actions/download-artifact@v7
-        with:
-          pattern: release-firmware-*
+          pattern: firmware-*
           merge-multiple: true
-          path: release-firmware
-
-      - name: Generate release catalog
+          path: dist
+      - name: Checksums and notes
         run: |
-          python3 scripts/generate_release_catalog.py \
-            --version "${{ env.RELEASE_VERSION }}" \
-            --repo "${{ github.repository }}" \
-            --firmware "release-firmware/firmware-x3-x4-v${{ env.RELEASE_VERSION }}.bin" \
-            --firmware "release-firmware/firmware-sticky-v${{ env.RELEASE_VERSION }}.bin" \
-            --firmware "release-firmware/firmware-x4-pro-v${{ env.RELEASE_VERSION }}.bin" \
-            --firmware "release-firmware/firmware-x4-classic-v${{ env.RELEASE_VERSION }}.bin" \
-            --output ".pio/build/catalog"
-
-      - name: Publish catalog to GitHub Pages source
-        env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          CROSSINK_SIGNING_SSH_KEY: ${{ secrets.CROSSINK_SIGNING_SSH_KEY }}
+          cd dist && sha256sum *.bin > SHA256SUMS.txt && cd ..
+          BASE=$(python3 -c "import configparser; c = configparser.ConfigParser(); c.read('platformio.ini'); print(c['crossink']['version'])")
+          {
+            echo "CrossIndix $VERSION, built from CrossInk $BASE with Lipi shaping for Bengali and Devanagari."
+            echo
+            echo "Firmware: \`crossindix-$VERSION-x3-x4.bin\` (X3 and X4), \`-x4-pro.bin\`, \`-x4-classic.bin\`."
+            echo "Fonts: the font folders are attached by the \"Release fonts\" workflow; copy a whole folder into \`.fonts\` on the SD card."
+            echo "Install steps and troubleshooting: README.md."
+            echo
+            echo '```'; cat dist/SHA256SUMS.txt; echo '```'
+          } > notes.md
+      - name: Create release
         run: |
-          if [ -z "$CROSSINK_SIGNING_SSH_KEY" ]; then
-            echo "::error::CROSSINK_SIGNING_SSH_KEY is not set"
-            exit 1
-          fi
+          PRE=""; case "$VERSION" in *-*) PRE="--prerelease";; esac
+          gh release create "$GITHUB_REF_NAME" dist/*.bin dist/SHA256SUMS.txt \
+            --title "CrossIndix $VERSION" --notes-file notes.md $PRE
 
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$CROSSINK_SIGNING_SSH_KEY" > ~/.ssh/crossink_actions_signing
-          chmod 600 ~/.ssh/crossink_actions_signing
-          ssh-keygen -y -f ~/.ssh/crossink_actions_signing > ~/.ssh/crossink_actions_signing.pub
-
-          git config user.name "uxjulia"
-          git config user.email "julia@uxj.io"
-          git config gpg.format ssh
-          git config user.signingkey "$HOME/.ssh/crossink_actions_signing.pub"
-
-          git fetch origin "$DEFAULT_BRANCH"
-          git worktree add ../crossink-pages "origin/$DEFAULT_BRANCH"
-          cp ".pio/build/catalog" "../crossink-pages/docs/catalog"
-          cd ../crossink-pages
-          if git diff --quiet -- docs/catalog; then
-            echo "docs/catalog is already current"
-            exit 0
-          fi
-          git add docs/catalog
-          git commit -S -m "Update release manifests for v${RELEASE_VERSION}"
-          git push origin "HEAD:$DEFAULT_BRANCH"
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          token: ${{ secrets.RELEASE_PAT }}
-          tag_name: v${{ env.RELEASE_VERSION }}
-          target_commitish: ${{ github.sha }}
-          draft: true
-          files: |
-            release-firmware/firmware-x3-x4-v${{ env.RELEASE_VERSION }}.bin
-            release-firmware/firmware-sticky-v${{ env.RELEASE_VERSION }}.bin
-            release-firmware/firmware-x4-pro-v${{ env.RELEASE_VERSION }}.bin
-            release-firmware/firmware-x4-classic-v${{ env.RELEASE_VERSION }}.bin
+  fonts:
+    if: github.event_name == 'push'
+    needs: publish
+    uses: ./.github/workflows/release-fonts.yml
+    with:
+      tag: ${{ github.ref_name }}

@@ -244,7 +244,7 @@ uint8_t migrateTiltDirectionValue(const uint8_t direction) {
 
 const char* CrossPointSettings::getDefaultDeviceName() {
 #if (defined(FREEINK_DEVICE_X4CLASSIC) && FREEINK_DEVICE_X4CLASSIC) || defined(SIMULATOR_DEVICE_X4_CLASSIC)
-  return "X4 Classic";
+  return "CrossIndix X4 Classic";
 #endif
   if (BoardConfig::isSticky()) return "Sticky";
   if (BoardConfig::isX4Pro()) return "CrossIndix X4 Pro";
