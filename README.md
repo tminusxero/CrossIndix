@@ -1,63 +1,76 @@
 # CrossIndix
 
-Read Bengali and Hindi books on your Xteink.
+Bangla and Hindi books, rendered the way they are printed, on the Xteink X3, X4, X4 Pro and X4 Classic.
 
-CrossIndix is reader firmware for the Xteink X3, X4 and X4 Pro. It is
-[CrossInk](https://github.com/uxjulia/CrossInk) with one addition: Bengali and Devanagari text
-renders properly. Conjuncts, vowel signs and marks look the way they do in print, and book
-titles in these scripts show correctly in the library.
+CrossIndix is [CrossInk](https://github.com/uxjulia/CrossInk) with one addition: text in the Bengali
+and Devanagari scripts comes out right. Conjuncts join, vowel signs sit where they belong, rephs and
+other marks land on the letter they modify, and book titles in these scripts read correctly in the
+library and menus. Everything else is CrossInk as you know it.
 
-Languages covered: Bangla and Assamese (Bengali script); Hindi, Marathi, Nepali and Sanskrit
-(Devanagari script).
+Languages: Bangla and Assamese (Bengali script); Hindi, Marathi, Nepali and Sanskrit (Devanagari
+script). Other Indian scripts are not supported yet; see [Other scripts](#other-scripts).
+
+![Same words in the same font: stock firmware above, CrossIndix below](docs/images/before-after-shaping.png)
 
 ## What you need
 
-- An Xteink X3, X4 or X4 Pro.
-- A USB-C cable and a computer, to install the firmware once.
-- Your books as EPUB files. Almost any EPUB bought or downloaded today is fine. Scanned PDFs
-  are not.
+- An Xteink X3, X4, X4 Pro or X4 Classic. The X4 Classic image is built by the same pipeline as the
+  others but has not yet been run on a real X4 Classic; if you own one, please report.
+- A USB-C cable and a computer, to install the firmware once. Later updates arrive over Wi-Fi.
+- Books as EPUB files.
 
-## Install in four steps
+## Install
 
-1. **Install the firmware.** Download the file for your device from the Releases page:
-   `crossindix-<version>-x4-pro.bin` for the X4 Pro, `crossindix-<version>-x4-classic.bin` for the
-   X4 Classic, `crossindix-<version>-x3-x4.bin` for the X3 and X4. Then follow the flashing
-   guide in [docs/installation.md](docs/installation.md). Your books and settings on the SD
-   card are not touched.
+1. **Firmware.** Download the image for your device from the
+   [Releases](https://github.com/tminusxero/CrossIndix/releases) page:
+   `crossindix-<version>-x3-x4.bin` (X3 and X4), `crossindix-<version>-x4-pro.bin` or
+   `crossindix-<version>-x4-classic.bin`. Flash it as described in
+   [docs/installation.md](docs/installation.md). Books and settings on the SD card are kept. If you
+   come from CrossInk or CrossPoint, nothing else changes.
 
-2. **Copy the fonts.** Download the font folder for your script from the same Releases page
-   (`NotoSerifBengali` or `NotoSerifDevanagari`) and copy the whole folder into the `.fonts`
-   folder on the SD card, so it looks like this:
+2. **Fonts.** The device needs a font folder prepared for CrossIndix; fonts from CrossInk's own
+   font list draw the letters but cannot join them. Two ways to get one:
 
-   ```
-   SD card
-   └── .fonts
-       └── NotoSerifDevanagari
-           ├── NotoSerifDevanagari_8.cpfont
-           ├── NotoSerifDevanagari_10.cpfont
-           └── ...
-   ```
+   - On the device, with Wi-Fi: Settings > Reader > Font Options > Download Fonts, pick a family,
+     and the folder is installed for you. (From version 0.1.0; on 0.1.0-beta use the next way.)
+   - By hand: download a family's zip from the same Releases page, unzip it, and copy the whole
+     folder into the hidden `.fonts` folder on the SD card:
 
-   Both folders can be installed side by side. The `.fonts` folder is hidden on some
-   computers; create it if it is not there. On the X4 Pro you can also do this over USB from
-   the device: Home > File Transfer > USB Drive.
+     ```
+     SD card
+     └── .fonts
+         └── NotoSerifBengali
+             ├── NotoSerifBengali_8.cpfont
+             ├── NotoSerifBengali_9.cpfont
+             ├── ...
+             └── OFL.txt
+     ```
 
-3. **Copy your books** onto the SD card as usual.
+     Any number of families can sit side by side. On the X4 Pro and X4 Classic the card can also be
+     reached over USB from the device: Home > File Transfer > USB Drive.
 
-4. **Choose the font.** On the device go to Settings > Reader > Font Options > Font Family and
-   pick NotoSerifBengali or NotoSerifDevanagari. Open a book and read.
+3. **Books.** Copy your EPUBs onto the SD card as usual.
 
-Book titles and file names in Bengali or Devanagari appear correctly in the library as soon
-as the font folder is on the card, whatever font you read with.
+4. **Choose the font.** Settings > Reader > Font Options > Font Family, pick one of the installed
+   families, open a book.
+
+Titles and file names in Bengali or Devanagari show correctly in the library as soon as one folder of
+that script is on the card, whichever font you read with.
+
+## Updates
+
+Settings > System > Check for Updates looks at this project's releases and installs the image for
+your device over Wi-Fi after verifying its checksum (from version 0.1.0; 0.1.0-beta devices are
+offered 0.1.0 by the same screen). Font folders already on the card keep working across updates.
 
 ## What to expect
 
-- Text matches what a computer or phone would show for more than 99 words in 100 in Bengali
-  novels and Hindi novels. Classical Sanskrit, with its long compound words, is around 95 in
-  100; the rest differ only in the width of a vowel sign before a conjunct.
-- Bengali has been used daily on an X4 Pro. Devanagari has been tested in the emulator and is
-  waiting for its first reader with a device.
-- Page turns are as fast as with any other font.
+- Shaping is checked word by word against what a desktop renders with the same font (HarfBuzz).
+  Over the Bangla novels used for testing, Noto Serif Bengali, Hind Siliguri and Noto Sans Bengali
+  agree for 99.3 words in 100 or more, Tiro Bangla for 98.9 or more. Over Hindi prose and the
+  Bhagavad Gita, Noto Serif Devanagari and Tiro Devanagari Sanskrit agree for 99.5 in 100 or more.
+  Most of the remaining differences are the width of a vowel sign before a wide conjunct.
+- Mixed books are fine: Latin text in the same book uses the same font, which covers it.
 
 ## If something looks wrong
 
@@ -72,23 +85,42 @@ are what the library, menus and status bar use. Without them, titles show as dia
 though the books themselves open fine.
 
 **Conjuncts split into separate letters with a hasanta**, for example ক ্ ষ instead of ক্ষ. The
-font came from the ordinary CrossInk font store. Only the folders on this project's Releases
-page carry the extra data that joins letters.
+font came from somewhere other than this project's releases. Only the CrossIndix folders carry
+the data that joins letters.
 
-**A book in another Indian script** (Tamil, Gujarati, Punjabi, Telugu, Kannada, Malayalam,
-Odia, Sinhala) shows letters but no conjuncts. Those scripts are not supported yet.
+**A word looks different from your phone.** Please open an issue with the book, the font and the
+word; most of these are quick to fix in the font data.
 
 ## Fonts
 
-The fonts are Noto Serif Bengali and Noto Serif Devanagari by Google, free under the SIL Open
-Font License. Other fonts can be prepared for this firmware; ask in the issues if you have a
-favourite.
+Six families, all from Google Fonts under the SIL Open Font License, each prepared in eight sizes
+from 8 to 20 points:
+
+| Family | Script | Style | Design |
+|---|---|---|---|
+| Noto Serif Bengali | Bengali | serif | Google |
+| Noto Sans Bengali | Bengali | sans | Google |
+| Tiro Bangla | Bengali | serif, book | Tiro Typeworks |
+| Hind Siliguri | Bengali | sans | Indian Type Foundry |
+| Noto Serif Devanagari | Devanagari | serif | Google |
+| Tiro Devanagari Sanskrit | Devanagari | serif, for Sanskrit | Tiro Typeworks |
+
+The licence text ships in every folder. The folders are produced by the
+[font workflow](.github/workflows/release-fonts.yml) from sources pinned in
+`scripts/indic-fonts.lock`, so a release can be rebuilt byte for byte.
+
+## Other scripts
+
+Tamil, Gujarati, Punjabi, Odia, Telugu, Kannada, Malayalam and Sinhala show their letters but not
+their conjuncts yet. The script knowledge lives in [Lipi](https://github.com/tminusxero/Lipi), a
+separate MIT-licensed engine where a script is a data file plus tests; its contributing guide and
+provider template are the way to add one.
 
 ## Credits
 
-CrossIndix is built on CrossInk by [uxjulia](https://github.com/uxjulia/CrossInk), which is
-itself based on CrossPoint. It is a separate project and is not part of either. Feedback, and
-reports of books that render badly, are welcome in the issues.
+CrossIndix is built on CrossInk by [uxjulia](https://github.com/uxjulia/CrossInk), itself based on
+[CrossPoint](https://github.com/crosspoint-reader/crosspoint-reader). It is a separate project and
+not part of either; please report rendering problems here, not upstream.
 
 ---
 
