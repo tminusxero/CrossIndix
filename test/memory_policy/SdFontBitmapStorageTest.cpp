@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <HalStorage.h>
 #include <SdCardFont.h>
+#include <Lipi.h>
+#include <ShapeTableCache.h>
 #include <gtest/gtest.h>
 
 #include <cstring>
@@ -158,4 +160,122 @@ TEST_F(SdFontBitmapStorageTest, ExternalBitmapsStillHonorUnderuseAndInternalPres
   font.clearCache();
   EXPECT_TRUE(fakeheap::live.empty());
   EXPECT_EQ(font.getEpdFont()->data->bitmap, nullptr);
+}
+
+namespace {
+// The fixture plus a kind-1 cluster table at the tail in the packed layout
+// (Lipi table format 3): the format marker (a length-2 entry) and one
+// length-3 entry (key ক্ষ -> U+E000, stored as the offset from U+E000).
+// Blob: 18-byte directory, then per length the bucket index and entries.
+// The last key byte of the entry sits at TABLE_LAST_KEY_BYTE (marker case).
+constexpr size_t TABLE_LEN3_INDEX = Lipi::PACKED_DIRECTORY_BYTES + 3 + 4;  // after the length-2 section
+constexpr size_t TABLE_LAST_KEY_BYTE = TABLE_LEN3_INDEX + 3 + 1;
+std::vector<uint8_t> shapedFixture(const uint8_t lastKeyByte = 0xB7, const bool marker = true,
+                                   const bool packedFlag = true) {
+  std::vector<uint8_t> b = fixture();
+  const uint32_t tableOffset = b.size();
+  std::vector<uint8_t> t(Lipi::PACKED_DIRECTORY_BYTES, 0);
+  if (marker) {
+    t[0] = 1;  // length 2: one entry
+    t[2] = 1;  // in one bucket
+  }
+  t[3] = 1;  // length 3: one entry
+  t[5] = 1;  // in one bucket
+  if (marker) {
+    const uint8_t len2[7] = {0x06, 1, 0, 0x06, 2, Lipi::TABLE_FORMAT, 0x00};  // bucket 06; entry 06 | meta | value
+    t.insert(t.end(), len2, len2 + 7);
+  }
+  const uint8_t len3[8] = {0x95, 1, 0, 0xCD, lastKeyByte, 3, 0x00, 0x00};  // bucket 95; entry CD B7 | meta | value
+  t.insert(t.end(), len3, len3 + 8);
+  b.insert(b.end(), t.begin(), t.end());
+  b[33] = static_cast<uint8_t>(1 | (packedFlag ? Lipi::TOC_KIND_PACKED : 0));  // shapeKind (+ packed flag)
+  put16(b, 34, marker ? 2 : 1);                                                // shapeEntryCount
+  put32(b, 60, tableOffset);                                                   // shapeTableFileOffset
+  return b;
+}
+bool registryEmpty() {
+  for (const auto& e : ShapeTableCache::entries_) {
+    if (e.data) return false;
+  }
+  return true;
+}
+}  // namespace
+
+TEST_F(SdFontBitmapStorageTest, IdenticalClusterTablesShareOneCopy) {
+  Storage.put("a.cpfont", shapedFixture());
+  Storage.put("b.cpfont", shapedFixture());
+  Storage.put("c.cpfont", shapedFixture(0xB8));  // same length and kind, different bytes
+  {
+    SdCardFont fa, fb, fc;
+    ASSERT_TRUE(fa.load("a.cpfont"));
+    ASSERT_TRUE(fb.load("b.cpfont"));
+    ASSERT_TRUE(fc.load("c.cpfont"));
+    const uint8_t* ta = fa.getEpdFont()->data->shapeTable;
+    const uint8_t* tb = fb.getEpdFont()->data->shapeTable;
+    const uint8_t* tc = fc.getEpdFont()->data->shapeTable;
+    ASSERT_NE(ta, nullptr);
+    EXPECT_EQ(ta, tb);
+    EXPECT_NE(ta, tc);
+    EXPECT_EQ(ShapeTableCache::refs(ta), 2);
+    EXPECT_EQ(ShapeTableCache::refs(tc), 1);
+    EXPECT_EQ(fa.getEpdFont()->data->shapeEntryCount, 2);
+    EXPECT_EQ(fa.getEpdFont()->data->shapeKind, 1);
+    EXPECT_EQ(ta[TABLE_LAST_KEY_BYTE], 0xB7);  // the length-2 marker section precedes the entry
+    EXPECT_EQ(tc[TABLE_LAST_KEY_BYTE], 0xB8);
+    // Reloading a font without a table drops its reference; the other keeps the bytes.
+    ASSERT_TRUE(fa.load("font.cpfont"));
+    EXPECT_EQ(fa.getEpdFont()->data->shapeTable, nullptr);
+    EXPECT_EQ(ShapeTableCache::refs(tb), 1);
+    EXPECT_EQ(tb[TABLE_LEN3_INDEX], 0x95);  // the length-3 bucket, after the marker section
+  }
+  EXPECT_TRUE(registryEmpty());
+}
+
+TEST_F(SdFontBitmapStorageTest, ClusterTableWithoutFormatMarkerIsIgnored) {
+  Storage.put("old.cpfont", shapedFixture(0xB7, false));
+  SdCardFont font;
+  ASSERT_TRUE(font.load("old.cpfont"));
+  EXPECT_EQ(font.getEpdFont()->data->shapeTable, nullptr);
+  EXPECT_EQ(font.getEpdFont()->data->shapeEntryCount, 0);
+  EXPECT_EQ(font.getEpdFont()->data->shapeKind, 0);
+  EXPECT_TRUE(registryEmpty());
+}
+
+TEST_F(SdFontBitmapStorageTest, ClusterTableInTheFlatLayoutIsIgnored) {
+  // A kind byte without the packed flag is the converter before table
+  // format 3: the table is ignored, the glyphs stay usable.
+  Storage.put("flat.cpfont", shapedFixture(0xB7, true, false));
+  SdCardFont font;
+  ASSERT_TRUE(font.load("flat.cpfont"));
+  EXPECT_EQ(font.getEpdFont()->data->shapeTable, nullptr);
+  EXPECT_EQ(font.getEpdFont()->data->shapeEntryCount, 0);
+  EXPECT_EQ(font.getEpdFont()->data->shapeKind, 0);
+  EXPECT_TRUE(registryEmpty());
+}
+
+TEST_F(SdFontBitmapStorageTest, ClusterTableRegistryOverflowStillFrees) {
+  ASSERT_TRUE(registryEmpty());
+  const uint8_t* tables[ShapeTableCache::MAX_ENTRIES + 2];
+  for (uint32_t i = 0; i < ShapeTableCache::MAX_ENTRIES + 2; i++) {
+    auto* bytes = new uint8_t[16];
+    memset(bytes, 0, 16);
+    bytes[0] = static_cast<uint8_t>(i);
+    bool shared = true;
+    tables[i] = ShapeTableCache::acquire(bytes, 16, 2, &shared);
+    EXPECT_FALSE(shared);
+    EXPECT_EQ(tables[i], bytes);
+  }
+  EXPECT_EQ(ShapeTableCache::refs(tables[0]), 1);
+  EXPECT_EQ(ShapeTableCache::refs(tables[ShapeTableCache::MAX_ENTRIES]), 0);  // unregistered, still owned
+  // A duplicate of an unregistered table is not shared; a duplicate of a registered one is.
+  auto* dup = new uint8_t[16];
+  memset(dup, 0, 16);
+  bool shared = false;
+  const uint8_t* got = ShapeTableCache::acquire(dup, 16, 2, &shared);
+  EXPECT_TRUE(shared);
+  EXPECT_EQ(got, tables[0]);
+  EXPECT_EQ(ShapeTableCache::refs(tables[0]), 2);
+  ShapeTableCache::release(got);
+  for (const uint8_t* t : tables) ShapeTableCache::release(t);
+  EXPECT_TRUE(registryEmpty());
 }

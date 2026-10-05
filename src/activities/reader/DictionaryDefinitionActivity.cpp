@@ -137,7 +137,7 @@ static bool shouldSanitizeDefinitionCodepoint(uint32_t cp) {
     case 0x2026:
       return true;
     default:
-      return isIpaCodepoint(cp) || isGreekCodepoint(cp) || utf8IsCombiningMark(cp) || cp == REPLACEMENT_GLYPH;
+      return isIpaCodepoint(cp) || isGreekCodepoint(cp) || utf8IsCombiningDiacritic(cp) || cp == REPLACEMENT_GLYPH;
   }
 }
 
@@ -305,7 +305,7 @@ static void appendDictionaryApproximation(uint32_t cp, std::string& out) {
       out += "...";
       break;  // ellipsis
     default:
-      if (!isIpaCodepoint(cp) && !isGreekCodepoint(cp) && !utf8IsCombiningMark(cp) && cp != REPLACEMENT_GLYPH) {
+      if (!isIpaCodepoint(cp) && !isGreekCodepoint(cp) && !utf8IsCombiningDiacritic(cp) && cp != REPLACEMENT_GLYPH) {
         utf8AppendCodepoint(cp, out);
       }
       break;

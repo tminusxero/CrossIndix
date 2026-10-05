@@ -85,7 +85,7 @@ void Wrapper::breakToken(const std::string& tok, EpdFontFamily::Style style, uin
   bool pendingIsIpa = false;
   uint32_t cp;
   while ((cp = utf8NextCodepoint(&bp))) {
-    const bool combining = utf8IsCombiningMark(cp);
+    const bool combining = utf8IsCombiningDiacritic(cp);
     const bool cpIsIpa = combining ? pendingIsIpa : isIpaCodepoint(cp);
     if (pending.empty()) pendingIsIpa = cpIsIpa;
     std::string cpStr;

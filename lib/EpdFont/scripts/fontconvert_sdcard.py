@@ -34,7 +34,15 @@ from collections import namedtuple
 
 from cpfont_version import CPFONT_VERSION
 
+# Cluster pre-shaping comes from the Lipi engine repository (submodule lipi/ at
+# the repo root): builder/shaping.py plus one spec per script under providers/.
+_LIPI_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "lipi"))
+sys.path.insert(0, _LIPI_ROOT)
+from builder import shaping as indic_shaping  # noqa: E402
+
 # --- Unicode interval presets ---
+# The shaped scripts add their own presets below (conjunct/vowel-sign shaping
+# is added at build time, see --shape).
 
 INTERVAL_PRESETS = {
     "ascii":       [(0x0020, 0x007E)],
@@ -78,6 +86,7 @@ INTERVAL_PRESETS = {
                     (0x2070, 0x209F), (0x2190, 0x21FF), (0x2200, 0x22FF),
                     (0xFB00, 0xFB06)],
 }
+INTERVAL_PRESETS.update({name: list(spec.intervals) for name, spec in indic_shaping.SCRIPTS.items()})
 
 # Keep common non-rendering controls/format marks present but invisible when a
 # requested interval includes them. Some source fonts expose cmap entries for
@@ -151,8 +160,10 @@ def resolve_intervals(preset_str):
 
 
 GlyphProps = namedtuple("GlyphProps", [
-    "width", "height", "advance_x", "left", "top", "data_length", "data_offset", "code_point"
-])
+    "width", "height", "advance_x", "left", "top", "data_length", "data_offset", "code_point",
+    "anchor_above", "anchor_below",  # mark attachment bytes (indic_shaping.anchors); 0 = none
+    "anchor_extra"  # v6: a base's third attachment point, packed into the data offset's top byte
+], defaults=(0, 0, 0))
 
 # Intermediate data from rasterizing one font style
 StyleRasterData = namedtuple("StyleRasterData", [
@@ -164,6 +175,8 @@ StyleRasterData = namedtuple("StyleRasterData", [
     "kern_left_classes", "kern_right_classes", "kern_matrix",
     "kern_left_class_count", "kern_right_class_count",
     "ligature_pairs",
+    "shape_kind",              # 0 = none, else the ScriptSpec.shape_kind of the shaped script
+    "shape_table",             # packed cluster table bytes (empty when shape_kind == 0)
 ])
 
 
@@ -261,22 +274,34 @@ def extract_ligature_glyph_indices_fonttools(font_path):
     return overrides
 
 
-def _extract_pairpos_subtable(subtable, glyph_to_cp, raw_kern):
-    """Extract kerning from a PairPos subtable (Format 1 or 2)."""
+def _extract_pairpos_subtable(subtable, glyph_to_cp, raw_kern, taken):
+    """Extract kerning from a PairPos subtable (Format 1 or 2).
+
+    A lookup's subtables are alternatives, not a sum: the shaper applies the
+    first subtable that matches a pair and skips the rest of the lookup, so
+    `taken` = (pairs matched, left glyphs covered by a class subtable) by the
+    lookup's earlier subtables; both are updated here. A class (Format 2)
+    subtable matches every pair whose left glyph it covers, whatever the
+    value, so later subtables never see that glyph again. Values of different
+    lookups do add up (the caller resets `taken` per lookup)."""
+    taken_pairs, taken_left = taken
     if subtable.Format == 1:
         # Individual pairs
         for i, coverage_glyph in enumerate(subtable.Coverage.glyphs):
-            if coverage_glyph not in glyph_to_cp:
+            if coverage_glyph not in glyph_to_cp or coverage_glyph in taken_left:
                 continue
             pair_set = subtable.PairSet[i]
             for pvr in pair_set.PairValueRecord:
                 if pvr.SecondGlyph not in glyph_to_cp:
                     continue
+                key = (coverage_glyph, pvr.SecondGlyph)
+                if key in taken_pairs:
+                    continue
+                taken_pairs.add(key)  # a zero value is a match too
                 xa = 0
                 if hasattr(pvr, 'Value1') and pvr.Value1:
                     xa = getattr(pvr.Value1, 'XAdvance', 0) or 0
                 if xa != 0:
-                    key = (coverage_glyph, pvr.SecondGlyph)
                     raw_kern[key] = raw_kern.get(key, 0) + xa
     elif subtable.Format == 2:
         # Class-based pairs — iterate by class, not by glyph, to avoid
@@ -286,9 +311,9 @@ def _extract_pairpos_subtable(subtable, glyph_to_cp, raw_kern):
         coverage_set = set(subtable.Coverage.glyphs)
 
         # Build reverse mappings: class_id -> list of glyph names
-        left_by_class = {}   # only glyphs in coverage AND glyph_to_cp
+        left_by_class = {}   # only glyphs in coverage AND glyph_to_cp, not yet taken by an earlier subtable
         for glyph in glyph_to_cp:
-            if glyph not in coverage_set:
+            if glyph not in coverage_set or glyph in taken_left:
                 continue
             c1 = class_def1.get(glyph, 0)
             left_by_class.setdefault(c1, []).append(glyph)
@@ -313,15 +338,24 @@ def _extract_pairpos_subtable(subtable, glyph_to_cp, raw_kern):
                 for lg in left_by_class[c1]:
                     for rg in right_by_class[c2]:
                         key = (lg, rg)
+                        if key in taken_pairs:
+                            continue  # an earlier pair subtable of this lookup matched it
                         raw_kern[key] = raw_kern.get(key, 0) + xa
+        # Every covered left glyph is now settled for the rest of the lookup.
+        for c1_glyphs in left_by_class.values():
+            taken_left.update(c1_glyphs)
 
 
-def extract_kerning_fonttools(font_path, codepoints, ppem):
+def extract_kerning_fonttools(font_path, codepoints, ppem, glyph_forms=None):
     """Extract kerning pairs from a font file using fonttools.
 
     Returns dict of {(leftCp, rightCp): pixel_adjust} for the given
     codepoints.  Values are scaled from font design units to integer
-    pixels at ppem.
+    pixels at ppem. `glyph_forms` maps extra codepoints to their edge glyph
+    ids ({PUA cp: (first gid, last gid)}): script shaping's spacing forms,
+    which have no cmap entry but take the font's pairs through the glyph at
+    each edge (Noto Serif Devanagari's half forms close up to the next
+    consonant: न्य, जन्म; स्तु kerns स् against the त that starts तु).
     """
     from fontTools.ttLib import TTFont
 
@@ -336,8 +370,19 @@ def extract_kerning_fonttools(font_path, codepoints, ppem):
         gname = cmap.get(cp)
         if gname:
             glyph_to_cps.setdefault(gname, []).append(cp)
+    # A form kerns as its last glyph on the left of a pair and as its first
+    # glyph on the right; plain glyphs are the same on both sides.
+    left_cps = {g: list(cps) for g, cps in glyph_to_cps.items()}
+    right_cps = {g: list(cps) for g, cps in glyph_to_cps.items()}
+    if glyph_forms:
+        order = font.getGlyphOrder()
+        for cp, (first, last) in glyph_forms.items():
+            if 0 <= last < len(order):
+                left_cps.setdefault(order[last], []).append(cp)
+            if 0 <= first < len(order):
+                right_cps.setdefault(order[first], []).append(cp)
     # Flat dict for membership checks and subtable extraction (uses keys only)
-    glyph_to_cp = glyph_to_cps
+    glyph_to_cp = dict.fromkeys(set(left_cps) | set(right_cps))
 
     # Collect raw kerning values in font design units
     raw_kern = {}  # (left_glyph_name, right_glyph_name) -> design_units
@@ -350,16 +395,21 @@ def extract_kerning_fonttools(font_path, codepoints, ppem):
                     if lg in glyph_to_cp and rg in glyph_to_cp:
                         raw_kern[(lg, rg)] = raw_kern.get((lg, rg), 0) + val
 
-    # 2. GPOS 'kern' feature
+    # 2. GPOS 'kern' and 'dist' features. Indic fonts put part of their pair
+    # spacing under 'dist', which HarfBuzz applies to Indic text like 'kern'
+    # (Tiro Devanagari Sanskrit: the visarga closes up 3 px before a danda, on
+    # 9,300 Gita words). Only its pair lookups are taken; contextual ones need
+    # the cluster table or an advance override.
     if 'GPOS' in font:
         gpos = font['GPOS'].table
         kern_lookup_indices = set()
         if gpos.FeatureList:
             for fr in gpos.FeatureList.FeatureRecord:
-                if fr.FeatureTag == 'kern':
+                if fr.FeatureTag in ('kern', 'dist'):
                     kern_lookup_indices.update(fr.Feature.LookupListIndex)
         for li in kern_lookup_indices:
             lookup = gpos.LookupList.Lookup[li]
+            taken = (set(), set())  # pairs / left glyphs settled by this lookup's earlier subtables
             for st in lookup.SubTable:
                 actual = st
                 # Unwrap Extension (lookup type 9) wrappers. After unwrapping,
@@ -380,7 +430,7 @@ def extract_kerning_fonttools(font_path, codepoints, ppem):
                     # type instead of the outer type is what makes those
                     # lookups actually reach the extractor.
                     if effective_type == 2:
-                        _extract_pairpos_subtable(actual, glyph_to_cp, raw_kern)
+                        _extract_pairpos_subtable(actual, glyph_to_cp, raw_kern, taken)
                     else:
                         print(f"  Debug: skipping unsupported GPOS kern lookupType="
                               f"{effective_type} (outer={lookup.LookupType}, Format={actual.Format})",
@@ -396,8 +446,8 @@ def extract_kerning_fonttools(font_path, codepoints, ppem):
     for (lg, rg), du in raw_kern.items():
         adjust = fp4_from_design_units(du, scale)
         if adjust != 0:
-            for lcp in glyph_to_cps[lg]:
-                for rcp in glyph_to_cps[rg]:
+            for lcp in left_cps.get(lg, ()):
+                for rcp in right_cps.get(rg, ()):
                     result[(lcp, rcp)] = adjust
     return result
 
@@ -608,10 +658,46 @@ def parse_fallback_range_spec(spec):
     return ranges
 
 
+def pack_2bit_bitmap(width, rows, pixel_at, thresholds):
+    """Quantise an 8-bit greyscale raster to the packed 2-bit glyph format.
+
+    pixel_at(y, x) returns the 8-bit coverage; thresholds are the three
+    4-bit cutoffs (light grey, dark grey, black). Four pixels per byte, MSB
+    first, row-major, last byte zero-padded — the same reduction the
+    per-glyph loop in rasterize_font_style applies.
+    """
+    pixels2b = []
+    px = 0
+    count = 0
+    for y in range(rows):
+        for x in range(width):
+            bm = pixel_at(y, x) >> 4
+            px = px << 2
+            if bm >= thresholds[2]:
+                px += 3
+            elif bm >= thresholds[1]:
+                px += 2
+            elif bm >= thresholds[0]:
+                px += 1
+            count += 1
+            if count % 4 == 0:
+                pixels2b.append(px)
+                px = 0
+    if count % 4 != 0:
+        px = px << ((4 - count % 4) * 2)
+        pixels2b.append(px)
+    return bytes(pixels2b)
+
+
 def rasterize_font_style(fontfile, size, intervals, style_id=0, force_autohint=False,
                          fallback_fontfiles=None, fallback_include_intervals=None,
-                         fallback_fontfile=None, darken_aa=False):
-    """Rasterize all glyphs for one font style. Returns StyleRasterData."""
+                         fallback_fontfile=None, darken_aa=False, shaping=None):
+    """Rasterize all glyphs for one font style. Returns StyleRasterData.
+
+    shaping: None or an indic_shaping.ScriptSpec — pre-shape that script's
+    clusters with HarfBuzz into composite PUA glyphs plus a cluster table
+    (see indic_shaping.py).
+    """
     import freetype
 
     style_names = {0: "regular", 1: "bold", 2: "italic", 3: "bolditalic"}
@@ -696,12 +782,49 @@ def rasterize_font_style(fontfile, size, intervals, style_id=0, force_autohint=F
     total_glyphs = sum(end - start + 1 for start, end in intervals)
     print(f"  [{style_label}] Validated: {len(intervals)} intervals, {total_glyphs} glyphs", file=sys.stderr)
 
+    # --- Script shaping: composite cluster glyphs in the PUA + cluster table ---
+    shape_kind = 0
+    shape_table = b""
+    composite_forms = {}  # PUA codepoint -> indic_shaping.ClusterForm
+    anchors = {}          # codepoint -> (anchor_above, anchor_below, anchor_extra) bytes
+    advance_overrides = {}  # codepoint -> advance_fp4 for zero-metric letters spaced by GPOS
+    left_overrides = {}  # codepoint -> extra left shift (px) from a GPOS single adjustment
+    top_overrides = {}  # mark codepoint -> px added to its bitmap top (the font's usual GPOS height)
+    ppem = size * 150.0 / 72.0
+    unit_scale = ppem / face.units_per_EM
+    if shaping is not None:
+        shape_kind, shape_table, composite_forms = indic_shaping.build_shaping(
+            fontfile, shaping, face, unit_scale, load_flags, anchors_out=anchors,
+            advances_out=advance_overrides, lefts_out=left_overrides, tops_out=top_overrides)
+        if shape_kind:
+            extra = indic_shaping.pua_intervals(composite_forms)
+            intervals = sorted(intervals + extra)
+            print(f"  [{style_label}] {shaping.name} shaping: {len(composite_forms)} composite glyphs, "
+                  f"{len(shape_table)} byte cluster table", file=sys.stderr)
+
     # Rasterize all glyphs
     total_bitmap_size = 0
     all_glyphs = []
 
     for i_start, i_end in intervals:
         for code_point in range(i_start, i_end + 1):
+            form = composite_forms.get(code_point)
+            if form is not None:
+                bmp = indic_shaping.render_run(face, form.run, unit_scale, load_flags,
+                                               mark=form.kind in indic_shaping.MARK_KINDS)
+                packed = pack_2bit_bitmap(bmp.width, bmp.height, lambda y, x, r=bmp.rows: r[y][x],
+                                          aa_thresholds)
+                glyph = GlyphProps(
+                    width=bmp.width, height=bmp.height, advance_x=bmp.advance_fp4,
+                    left=bmp.left, top=bmp.top + top_overrides.get(code_point, 0), data_length=len(packed),
+                    data_offset=total_bitmap_size, code_point=code_point,
+                    anchor_above=anchors.get(code_point, (0, 0, 0))[0],
+                    anchor_below=anchors.get(code_point, (0, 0, 0))[1],
+                    anchor_extra=anchors.get(code_point, (0, 0, 0))[2])
+                total_bitmap_size += len(packed)
+                all_glyphs.append((glyph, packed))
+                continue
+
             if is_synthetic_blank_codepoint(code_point):
                 glyph = GlyphProps(0, 0, 0, 0, 0, 0, total_bitmap_size, code_point)
                 all_glyphs.append((glyph, b''))
@@ -780,12 +903,15 @@ def rasterize_font_style(fontfile, size, intervals, style_id=0, force_autohint=F
             glyph = GlyphProps(
                 width=bitmap.width,
                 height=bitmap.rows,
-                advance_x=fp4_from_ft16_16(f.glyph.linearHoriAdvance),
-                left=f.glyph.bitmap_left,
-                top=f.glyph.bitmap_top,
+                advance_x=advance_overrides.get(code_point, fp4_from_ft16_16(f.glyph.linearHoriAdvance)),
+                left=f.glyph.bitmap_left + left_overrides.get(code_point, 0),
+                top=f.glyph.bitmap_top + top_overrides.get(code_point, 0),
                 data_length=len(packed),
                 data_offset=total_bitmap_size,
                 code_point=code_point,
+                anchor_above=anchors.get(code_point, (0, 0, 0))[0],
+                anchor_below=anchors.get(code_point, (0, 0, 0))[1],
+                anchor_extra=anchors.get(code_point, (0, 0, 0))[2],
             )
             total_bitmap_size += len(packed)
             all_glyphs.append((glyph, packed))
@@ -804,11 +930,24 @@ def rasterize_font_style(fontfile, size, intervals, style_id=0, force_autohint=F
     ppem = size * 150.0 / 72.0
     all_cps = set(g.code_point for g, _ in all_glyphs)
 
-    kern_map = extract_kerning_fonttools(fontfile, all_cps, ppem)
+    # Spacing forms of the cluster table kern through their edge glyphs.
+    glyph_forms = {cp: (form.run.gids[0], form.run.gids[-1]) for cp, form in composite_forms.items()
+                   if form.run.gids and form.kind not in indic_shaping.MARK_KINDS}
+    kern_map = extract_kerning_fonttools(fontfile, all_cps, ppem, glyph_forms)
     # SMP codepoints (> U+FFFF) cannot be stored in the uint16 kern codepoint
     # field; drop them before class derivation to avoid a downstream
     # struct.error when packing the binary kern tables.
     kern_map = {(lcp, rcp): v for (lcp, rcp), v in kern_map.items() if lcp <= 0xFFFF and rcp <= 0xFFFF}
+    # The builder shapes a form with the probe letter after it, so the advance of
+    # a form already carries its last glyph's pair with the probe (Noto Serif
+    # Devanagari प्+क -70 units). Now that the form has pairs of its own, that one
+    # comes off the advance, or every pair would count it twice (प्त 2.3 px off).
+    if shaping is not None and glyph_forms:
+        baked = {cp: kern_map[(cp, shaping.probe)] for cp in glyph_forms if (cp, shaping.probe) in kern_map}
+        if baked:
+            all_glyphs = [(g._replace(advance_x=g.advance_x - baked[g.code_point]), packed)
+                          if g.code_point in baked else (g, packed) for g, packed in all_glyphs]
+            print(f"  [{style_label}] {len(baked)} forms: probe pair taken off the advance", file=sys.stderr)
     print(f"  [{style_label}] Kerning: {len(kern_map)} pairs extracted", file=sys.stderr)
 
     (kern_left_classes, kern_right_classes, kern_matrix,
@@ -824,6 +963,11 @@ def rasterize_font_style(fontfile, size, intervals, style_id=0, force_autohint=F
     # extract_ligatures_fonttools (see the codepoints_set filter), so every
     # entry returned here is already 16-bit safe.
     ligature_pairs = extract_ligatures_fonttools(fontfile, all_cps)
+    if shape_kind != 0:
+        # The cluster shaper owns every substitution in the script's block; a
+        # stray GSUB pair keyed on its codepoints must not run over its output.
+        ligature_pairs = [(packed, lig) for packed, lig in ligature_pairs
+                          if not (shaping.in_block(packed >> 16) or shaping.in_block(packed & 0xFFFF))]
     if len(ligature_pairs) > 255:
         print(f"  [{style_label}] WARNING: {len(ligature_pairs)} ligature pairs exceeds uint8_t max (255), truncating",
               file=sys.stderr)
@@ -844,14 +988,30 @@ def rasterize_font_style(fontfile, size, intervals, style_id=0, force_autohint=F
         kern_left_class_count=kern_left_class_count,
         kern_right_class_count=kern_right_class_count,
         ligature_pairs=ligature_pairs,
+        shape_kind=shape_kind,
+        shape_table=shape_table,
     )
 
 
 # --- Binary packing helpers ---
 
 # EpdGlyph struct: 16 bytes, little-endian
-GLYPH_STRUCT_FORMAT = "<BBHhhH2xI"
+GLYPH_STRUCT_FORMAT = "<BBHhhHBBI"  # v5: bytes 10-11 are the mark anchors (v4: padding); v6: byte 15 (the
+# top byte of the 32-bit data offset, offsets stay below 16 MB) is a base's third anchor
 assert struct.calcsize(GLYPH_STRUCT_FORMAT) == 16
+
+
+def pack_data_offset(data_offset, anchor_extra):
+    """The glyph record's last field: the 24-bit bitmap offset with a base's
+    third anchor in the top byte (v6). Both are range-checked: an offset past
+    16 MB would silently land in the anchor byte, and the reader has no way
+    to tell."""
+    if not 0 <= data_offset < (1 << 24):
+        raise ValueError(f"glyph bitmap offset {data_offset} does not fit the record's 24 bits "
+                         "(bitmap section over 16 MB)")
+    if not 0 <= anchor_extra <= 0xFF:
+        raise ValueError(f"extra anchor byte {anchor_extra} out of range")
+    return data_offset | (anchor_extra << 24)
 
 
 def pack_style_sections(sd):
@@ -868,7 +1028,8 @@ def pack_style_sections(sd):
         glyphs_data += struct.pack(GLYPH_STRUCT_FORMAT,
                                    glyph.width, glyph.height, glyph.advance_x,
                                    glyph.left, glyph.top,
-                                   glyph.data_length, glyph.data_offset)
+                                   glyph.data_length, glyph.anchor_above, glyph.anchor_below,
+                                   pack_data_offset(glyph.data_offset, glyph.anchor_extra))
 
     kern_left_data = bytearray()
     for cp, cls in sd.kern_left_classes:
@@ -904,7 +1065,7 @@ def style_sections_total_size(sections):
 
 def generate_cpfont_multistyle(style_fonts, size, intervals, output_path,
                                force_autohint=False, fallback_style_fonts=None,
-                               fallback_style_intervals=None, darken_aa=False):
+                               fallback_style_intervals=None, darken_aa=False, shaping=None):
     """Generate a multi-style v4 .cpfont file.
 
     style_fonts: dict of {style_id: fontfile_path} e.g. {0: "Regular.ttf", 2: "Italic.ttf"}
@@ -931,7 +1092,8 @@ def generate_cpfont_multistyle(style_fonts, size, intervals, output_path,
             force_autohint=force_autohint,
             fallback_fontfiles=fallback_fontfiles,
             fallback_include_intervals=fallback_include_intervals,
-            darken_aa=darken_aa)
+            darken_aa=darken_aa,
+            shaping=shaping)
 
     # Pack binary sections for each style
     packed_sections = {}  # style_id -> tuple of section bytearrays
@@ -947,16 +1109,30 @@ def generate_cpfont_multistyle(style_fonts, size, intervals, output_path,
         style_offsets[style_id] = current_offset
         current_offset += style_sections_total_size(packed_sections[style_id])
 
+    # Cluster (shaping) tables trail every style's sections so a reader that
+    # predates them still maps the v4 layout unchanged; the TOC fields below
+    # are zero for styles without one.
+    shape_offsets = {}  # style_id -> absolute file offset (0 = none)
+    for style_id in sorted(raster_data.keys()):
+        sd = raster_data[style_id]
+        if sd.shape_kind != 0 and sd.shape_table:
+            shape_offsets[style_id] = current_offset
+            current_offset += len(sd.shape_table)
+        else:
+            shape_offsets[style_id] = 0
+
     # Build global header
     # V4 header: magic(8) + version(2) + flags(2) + styleCount(1) + reserved(19) = 32
     header = struct.pack("<8sHHB19s", MAGIC, CPFONT_VERSION, flags, style_count, bytes(19))
     assert len(header) == HEADER_SIZE
 
     # Build style TOC entries
-    # Each entry: styleId(1) + pad(3) + intervalCount(4) + glyphCount(4) +
-    #   advanceY(1) + ascender(2) + descender(2) + kernL(2) + kernR(2) +
-    #   kernLCls(1) + kernRCls(1) + ligCount(1) + dataOffset(4) + reserved(4) = 32
-    STYLE_TOC_FORMAT = "<B3xIIBhhHHBBBI4x"
+    # Each entry: styleId(1) + shapeKind(1) + shapeEntryCount(2) + intervalCount(4) +
+    #   glyphCount(4) + advanceY(1) + ascender(2) + descender(2) + kernL(2) + kernR(2) +
+    #   kernLCls(1) + kernRCls(1) + ligCount(1) + dataOffset(4) + shapeTableOffset(4) = 32
+    # shapeKind/shapeEntryCount/shapeTableOffset occupy what were reserved
+    # zero bytes, so fonts without shaping are byte-identical to before.
+    STYLE_TOC_FORMAT = "<BBHIIBhhHHBBBII"
     assert struct.calcsize(STYLE_TOC_FORMAT) == STYLE_TOC_ENTRY_SIZE
 
     toc_data = bytearray()
@@ -968,14 +1144,20 @@ def generate_cpfont_multistyle(style_fonts, size, intervals, output_path,
                   f"size is too large for this format.",
                   file=sys.stderr)
             sys.exit(1)
+        # The table is packed (Lipi format 3): the entry count comes from its
+        # directory, and the kind byte carries the packed flag so a reader that
+        # predates the layout ignores the table instead of misreading it.
+        shape_entries = indic_shaping.table_entry_count(sd.shape_table) if shape_offsets[style_id] else 0
         toc_data += struct.pack(STYLE_TOC_FORMAT,
                                 style_id,
+                                (sd.shape_kind | indic_shaping.TOC_KIND_PACKED) if shape_entries else 0, shape_entries,
                                 len(sd.intervals), len(sd.all_glyphs),
                                 sd.advanceY, sd.ascender, sd.descender,
                                 len(sd.kern_left_classes), len(sd.kern_right_classes),
                                 sd.kern_left_class_count, sd.kern_right_class_count,
                                 len(sd.ligature_pairs),
-                                style_offsets[style_id])
+                                style_offsets[style_id],
+                                shape_offsets[style_id])
 
     # Write output
     os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
@@ -986,6 +1168,10 @@ def generate_cpfont_multistyle(style_fonts, size, intervals, output_path,
         for style_id in sorted(packed_sections.keys()):
             for section in packed_sections[style_id]:
                 f.write(section)
+        for style_id in sorted(raster_data.keys()):
+            if shape_offsets[style_id]:
+                assert f.tell() == shape_offsets[style_id]
+                f.write(raster_data[style_id].shape_table)
         total_file_size = f.tell()
 
     # Print summary
@@ -1034,6 +1220,10 @@ def main():
                         help="Output directory for multi-size mode.")
     parser.add_argument("--list-presets", action="store_true",
                         help="List available interval presets and exit.")
+    parser.add_argument("--shape", dest="shape", default="auto",
+                        choices=["auto", "none"] + sorted(indic_shaping.SCRIPTS),
+                        help="Script shaping to pre-compute into the font (default: auto — the script "
+                             "whose block the intervals cover). Requires uharfbuzz.")
 
     # Multi-style mode: per-style font file arguments (generates v4 .cpfont)
     parser.add_argument("--regular", dest="font_regular",
@@ -1118,6 +1308,27 @@ def main():
 
     intervals = resolve_intervals(args.intervals)
 
+    shaping = None
+    if args.shape == "auto":
+        wanted = indic_shaping.script_for_intervals(intervals)
+    elif args.shape == "none":
+        wanted = None
+    else:
+        wanted = indic_shaping.SCRIPTS[args.shape]
+    if wanted is not None:
+        # A font for a shaped script without its cluster table would load and
+        # render conjuncts as consonant + hasanta, so a missing builder
+        # dependency is an error, not a warning, whether the script was asked
+        # for or found in the intervals.
+        try:
+            import uharfbuzz  # noqa: F401
+        except ImportError:
+            how = f"--shape {args.shape}" if args.shape != "auto" else f"the {wanted.name} intervals (--shape auto)"
+            print(f"Error: {how} requires the 'uharfbuzz' package (pip install uharfbuzz); "
+                  "pass --shape none to build the font without conjunct shaping", file=sys.stderr)
+            sys.exit(1)
+        shaping = wanted
+
     # Determine sizes
     if args.sizes:
         sizes = [int(s.strip()) for s in args.sizes.split(",")]
@@ -1177,7 +1388,8 @@ def main():
             force_autohint=args.force_autohint,
             fallback_style_fonts=fallback_style_fonts,
             fallback_style_intervals=fallback_style_intervals,
-            darken_aa=args.darken_aa)
+            darken_aa=args.darken_aa,
+            shaping=shaping)
     print(f"\nTotal: {len(sizes)} files, {total_size / 1024 / 1024:.2f} MB", file=sys.stderr)
 
 

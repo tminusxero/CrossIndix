@@ -482,3 +482,93 @@ families:
         {
           url: "https://raw.githubusercontent.com/jacobxperez/lexica-ultralegible/main/fonts/ttf/LexicaUltralegible-BoldItalic.ttf",
         }
+
+  # ── Indic (Bengali, Devanagari) ─────────────────────────────────────────
+  # Conjuncts, reph and vowel-sign forms are pre-shaped by fontconvert_sdcard.py
+  # (needs uharfbuzz). Sizes 8/10/12 let Bengali book titles render in the UI.
+
+  - name: NotoSerifBengali
+    description: "Noto Serif Bengali"
+    languages: "Bengali, Latin"
+    intervals: bengali,latin-ext
+    sizes: [8, 9, 10, 12, 14, 16, 18, 20]
+    styles:
+      regular:
+        {
+          url: "https://raw.githubusercontent.com/google/fonts/main/ofl/notoserifbengali/NotoSerifBengali%5Bwdth%2Cwght%5D.ttf",
+          variable: { wdth: 100, wght: 400 },
+        }
+      bold:
+        {
+          url: "https://raw.githubusercontent.com/google/fonts/main/ofl/notoserifbengali/NotoSerifBengali%5Bwdth%2Cwght%5D.ttf",
+          variable: { wdth: 100, wght: 700 },
+        }
+
+  - name: NotoSerifDevanagari
+    description: "Noto Serif Devanagari"
+    languages: "Hindi, Marathi, Nepali, Sanskrit, Latin"
+    intervals: devanagari,latin-ext
+    sizes: [8, 9, 10, 12, 14, 16, 18, 20]
+    styles:
+      regular:
+        {
+          url: "https://raw.githubusercontent.com/google/fonts/main/ofl/notoserifdevanagari/NotoSerifDevanagari%5Bwdth%2Cwght%5D.ttf",
+          variable: { wdth: 100, wght: 400 },
+        }
+      bold:
+        {
+          url: "https://raw.githubusercontent.com/google/fonts/main/ofl/notoserifdevanagari/NotoSerifDevanagari%5Bwdth%2Cwght%5D.ttf",
+          variable: { wdth: 100, wght: 700 },
+        }
+
+  - name: NotoSansDevanagari
+    description: "Noto Sans Devanagari"
+    languages: "Hindi, Marathi, Nepali, Sanskrit, Latin"
+    intervals: devanagari,latin-ext
+    sizes: [8, 9, 10, 12, 14, 16, 18, 20]
+    styles:
+      regular:
+        {
+          url: "https://raw.githubusercontent.com/google/fonts/main/ofl/notosansdevanagari/NotoSansDevanagari%5Bwdth%2Cwght%5D.ttf",
+          variable: { wdth: 100, wght: 400 },
+        }
+      bold:
+        {
+          url: "https://raw.githubusercontent.com/google/fonts/main/ofl/notosansdevanagari/NotoSansDevanagari%5Bwdth%2Cwght%5D.ttf",
+          variable: { wdth: 100, wght: 700 },
+        }
+
+  - name: TiroBangla
+    description: "Tiro Bangla — book serif"
+    languages: "Bengali, Latin"
+    intervals: bengali,latin-ext
+    sizes: [8, 9, 10, 12, 14, 16, 18, 20]
+    styles:
+      regular: { url: "https://raw.githubusercontent.com/google/fonts/main/ofl/tirobangla/TiroBangla-Regular.ttf" }
+      italic: { url: "https://raw.githubusercontent.com/google/fonts/main/ofl/tirobangla/TiroBangla-Italic.ttf" }
+
+  - name: NotoSansBengali
+    description: "Noto Sans Bengali"
+    languages: "Bengali, Latin"
+    intervals: bengali,latin-ext
+    sizes: [8, 9, 10, 12, 14, 16, 18, 20]
+    styles:
+      regular:
+        {
+          url: "https://raw.githubusercontent.com/google/fonts/main/ofl/notosansbengali/NotoSansBengali%5Bwdth%2Cwght%5D.ttf",
+          variable: { wdth: 100, wght: 400 },
+        }
+      bold:
+        {
+          url: "https://raw.githubusercontent.com/google/fonts/main/ofl/notosansbengali/NotoSansBengali%5Bwdth%2Cwght%5D.ttf",
+          variable: { wdth: 100, wght: 700 },
+        }
+
+  - name: HindSiliguri
+    description: "Hind Siliguri — sans"
+    languages: "Bengali, Latin"
+    intervals: bengali,latin-ext
+    sizes: [8, 9, 10, 12, 14, 16, 18, 20]
+    styles:
+      regular: { url: "https://raw.githubusercontent.com/google/fonts/main/ofl/hindsiliguri/HindSiliguri-Regular.ttf" }
+      bold: { url: "https://raw.githubusercontent.com/google/fonts/main/ofl/hindsiliguri/HindSiliguri-Bold.ttf" }

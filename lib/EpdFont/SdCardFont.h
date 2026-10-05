@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <new>
 #include <string>
 #include <vector>
 
@@ -19,7 +20,8 @@
 // lib/EpdFont/scripts/cpfont_version.py. This firmware-side copy must be
 // bumped manually when the firmware is updated to support a new format.
 // Reader enforcement: SdCardFont::load().
-#define CPFONT_VERSION 4
+#define CPFONT_VERSION 6  // 6: third base anchor in the data offset's top byte, mark placement modes
+#define CPFONT_MIN_VERSION 4  // v4 files load with no mark anchors
 
 class SdCardFont {
  public:
@@ -123,6 +125,13 @@ class SdCardFont {
   // Used to generate deterministic font IDs for section cache invalidation.
   uint32_t contentHash() const { return contentHash_; }
 
+  // Test which of `codepoints` the regular style of the .cpfont at `path`
+  // covers, without loading the font: reads the header, the style TOC and the
+  // interval table in small chunks. Bit i of the result is set when
+  // codepoints[i] is covered. Returns 0 on any read error. Used at boot to
+  // index which installed families cover which scripts.
+  static uint32_t probeCoverage(const char* path, const uint32_t* codepoints, uint8_t count);
+
  private:
   // Per-style metadata (parsed from file header/TOC)
   struct CpFontHeader {
@@ -137,6 +146,8 @@ class SdCardFont {
     uint8_t kernLeftClassCount = 0;
     uint8_t kernRightClassCount = 0;
     uint8_t ligaturePairCount = 0;
+    uint8_t shapeKind = 0;         // Lipi::SHAPE_KIND_* (0 = none)
+    uint16_t shapeEntryCount = 0;  // cluster table entries (Lipi::entrySizeForKind bytes each)
   };
 
   // All per-style data: file offsets, intervals, kern/lig, prewarm cache, EpdFont
@@ -151,6 +162,14 @@ class SdCardFont {
     uint32_t kernMatrixFileOffset = 0;
     uint32_t ligatureFileOffset = 0;
     uint32_t bitmapFileOffset = 0;
+    uint32_t shapeTableFileOffset = 0;  // absolute; 0 = no cluster table
+
+    // Script cluster table (see EpdFontData::shapeTable). Loaded with the
+    // font and resident for its lifetime: it is needed by every measure and
+    // draw of Indic text, is a few KB, and only shaping fonts carry one. The
+    // bytes are shared with every other loaded font carrying the same table
+    // (ShapeTableCache), so a family's sizes hold one copy between them.
+    const uint8_t* shapeTable = nullptr;
 
     // Full intervals loaded from file (kept in RAM for codepoint lookup)
     EpdUnicodeInterval* fullIntervals = nullptr;
@@ -239,7 +258,38 @@ class SdCardFont {
     bool present = false;
   };
 
-  PerStyle styles_[MAX_STYLES] = {};
+  // One heap block per style the file carries instead of four inline PerStyles
+  // (~700 B each; fonts are usually regular-only). A block does not move while
+  // the font is loaded: stubData, miniData and epdFont point into it. An absent
+  // index reads as a shared PerStyle with present == false, which callers
+  // check before writing.
+  class StyleSlots {
+   public:
+    StyleSlots() = default;
+    StyleSlots(const StyleSlots&) = delete;
+    StyleSlots& operator=(const StyleSlots&) = delete;
+    ~StyleSlots() { clear(); }
+    PerStyle& operator[](uint8_t i) { return slots_[i] ? *slots_[i] : absent(); }
+    const PerStyle& operator[](uint8_t i) const { return slots_[i] ? *slots_[i] : absent(); }
+    bool create(uint8_t i) {
+      if (!slots_[i]) slots_[i] = new (std::nothrow) PerStyle();
+      return slots_[i] != nullptr;
+    }
+    void clear() {
+      for (auto*& slot : slots_) {
+        delete slot;
+        slot = nullptr;
+      }
+    }
+
+   private:
+    static PerStyle& absent() {
+      static PerStyle none;
+      return none;
+    }
+    PerStyle* slots_[MAX_STYLES] = {};
+  };
+  StyleSlots styles_;
   uint8_t styleCount_ = 0;
 
   char filePath_[128] = {};

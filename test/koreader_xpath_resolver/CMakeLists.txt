@@ -2,6 +2,7 @@ add_executable(KOReaderXPathResolverTest
   KOReaderXPathResolverTest.cpp
   ${REPO_ROOT}/lib/KOReaderSync/ChapterXPathResolver.cpp
   ${REPO_ROOT}/lib/Utf8/Utf8.cpp
+  ${REPO_ROOT}/lipi/engine/Lipi.cpp  # the mark queries of LipiMarks.h live in the engine
   ${REPO_ROOT}/lib/expat/xmlparse.c
   ${REPO_ROOT}/lib/expat/xmlrole.c
   ${REPO_ROOT}/lib/expat/xmltok.c

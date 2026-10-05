@@ -4,12 +4,15 @@
 #include <BuildScratch.h>
 #include <FontDecompressor.h>
 #include <HalGPIO.h>
+#include <Lipi.h>
 #include <Logging.h>
+#include <ScriptBlock.h>
 #include <SdCardFont.h>
 #include <Utf8.h>
 #include <freertos/task.h>
 
 #include <algorithm>
+#include <vector>
 
 #include "FontCacheManager.h"
 
@@ -67,6 +70,69 @@ void draw2BitFontPixel(const GfxRenderer& renderer, const GfxRenderer::RenderMod
 }
 
 const char* resolveVisualText(const char* text, std::string& visualBuffer, BidiUtils::BidiBaseDir baseDir);
+const char* resolveShapedText(const EpdFontFamily& font, EpdFontFamily::Style style, const char* text,
+                              std::string& buffer);
+
+// The codepoints Indic shaping can introduce that the words themselves do not
+// contain: letters of the shaped blocks (split vowels decompose into signs the
+// text never had) and the PUA composites. Tracked as a bitset so the warm-up
+// text below carries each of them once instead of the whole shaped paragraph
+// once per style. Allocated on first use, so Latin text never pays for it.
+class ShapedCodepointSet {
+ public:
+  // Returns true when `cp` is a tracked codepoint seen for the first time.
+  bool add(const uint32_t cp) {
+    uint32_t idx;
+    if (Lipi::inIndicBlocks(cp)) {
+      idx = cp - kIndicBlockBase;
+    } else if (cp >= Lipi::PUA_BASE_FIRST && cp <= Lipi::PUA_PRECONS_LAST) {
+      idx = INDIC_BITS + (cp - Lipi::PUA_BASE_FIRST);
+    } else {
+      return false;
+    }
+    if (bits_.empty()) bits_.assign(WORDS, 0);
+    const uint32_t mask = 1u << (idx & 31);
+    if (bits_[idx >> 5] & mask) return false;
+    bits_[idx >> 5] |= mask;
+    return true;
+  }
+
+ private:
+  static constexpr uint32_t INDIC_BITS = kIndicBlockCount * kIndicBlockSize;
+  static constexpr uint32_t WORDS = (INDIC_BITS + (Lipi::PUA_PRECONS_LAST - Lipi::PUA_BASE_FIRST + 1)) / 32;
+  std::vector<uint32_t> bits_;
+};
+
+// Appends the codepoints the shaped form of `text` adds beyond the text
+// itself, for every requested style that carries a cluster table, so the SD
+// advance table is warmed with the composite PUA glyphs getTextAdvanceX()
+// will measure (same reason as appendShapedRtlTokens below). `seen` dedupes
+// across words and styles; `scratch` is reused between calls.
+void appendShapedIndicText(SdCardFont& font, const char* text, const uint8_t styleMask, ShapedCodepointSet& seen,
+                           std::string& scratch, std::string& shapedOut) {
+  if (!Lipi::mayNeedShaping(text)) return;
+  // Styles sharing one cluster table (ShapeTableCache hands identical tables
+  // the same bytes; a regular-only family resolves every style to it) shape
+  // the same, so each distinct table is shaped once.
+  const uint8_t* shapedTables[SdCardFont::MAX_STYLES] = {};
+  uint8_t shapedCount = 0;
+  for (uint8_t si = 0; si < SdCardFont::MAX_STYLES; si++) {
+    if (!(styleMask & (1u << si))) continue;
+    const EpdFont* epdFont = font.getEpdFont(si);
+    if (!epdFont || epdFont->data->shapeEntryCount == 0) continue;
+    bool done = false;
+    for (uint8_t k = 0; k < shapedCount; k++) done = done || shapedTables[k] == epdFont->data->shapeTable;
+    if (done) continue;
+    shapedTables[shapedCount++] = epdFont->data->shapeTable;
+    const Lipi::ClusterTable table{epdFont->data->shapeTable, epdFont->data->shapeEntryCount, epdFont->data->shapeKind};
+    if (!Lipi::shape(text, table, scratch)) continue;
+    const auto* p = reinterpret_cast<const unsigned char*>(scratch.c_str());
+    while (*p) {
+      const uint32_t cp = utf8NextCodepoint(&p);
+      if (seen.add(cp)) utf8AppendCodepoint(cp, shapedOut);
+    }
+  }
+}
 
 // Appends the shaped visual form of every RTL token in `text` to `shapedOut`.
 // getTextAdvanceX() measures the bidi-reordered, Arabic-shaped codepoint stream,
@@ -160,6 +226,9 @@ void GfxRenderer::ensureSdCardFontReady(int fontId, const char* utf8Text, uint8_
   if (it != sdCardFonts_.end()) {
     std::string shaped;
     appendShapedRtlTokens(utf8Text, shaped);
+    ShapedCodepointSet seen;
+    std::string scratch;
+    appendShapedIndicText(*it->second, utf8Text, styleMask, seen, scratch, shaped);
     int missed = it->second->buildAdvanceTable(utf8Text, styleMask, shaped.empty() ? nullptr : shaped.c_str());
     if (missed > 0) {
       LOG_DBG("GFX", "ensureSdCardFontReady: %d glyph(s) not found", missed);
@@ -175,8 +244,11 @@ void GfxRenderer::ensureSdCardFontReady(int fontId, const std::deque<std::string
     // The table survives across paragraphs/sections (capped per font), so
     // repeated indexing of the same SD font amortizes glyph-metric SD reads.
     std::string shaped;
+    ShapedCodepointSet seen;
+    std::string scratch;
     for (const auto& w : words) {
       appendShapedRtlTokens(w.c_str(), shaped);
+      appendShapedIndicText(*it->second, w.c_str(), styleMask, seen, scratch, shaped);
     }
     int missed =
         it->second->buildAdvanceTable(words, includeHyphen, styleMask, shaped.empty() ? nullptr : shaped.c_str());
@@ -329,6 +401,17 @@ void GfxRenderer::FrameBufferLoan::end() {
 
 bool GfxRenderer::isFontCacheScanning() const { return fontCacheManager_ && fontCacheManager_->isScanning(); }
 
+void GfxRenderer::ensureSdGlyphsResident(const int fontId, const char* text, const EpdFontFamily::Style style,
+                                         const bool metadataOnly) const {
+  const auto sdIt = sdCardFonts_.find(fontId);
+  if (sdIt == sdCardFonts_.end() || text == nullptr || *text == '\0') return;
+  // SUP/SUB bits don't select a distinct .cpfont style bitstream — mask to the
+  // base style. Kerning is skipped: UI fallback strings (titles, file names)
+  // have no useful kern pairs and the class tables cost heap on tight screens.
+  const uint8_t styleMask = static_cast<uint8_t>(1u << (static_cast<uint8_t>(style) & 0x03));
+  sdIt->second->prewarm(text, styleMask, metadataOnly, /*includeKerning=*/false);
+}
+
 void GfxRenderer::insertFont(const int fontId, EpdFontFamily font) {
   auto result = fontMap.insert({fontId, font});
   if (!result.second) {
@@ -337,33 +420,48 @@ void GfxRenderer::insertFont(const int fontId, EpdFontFamily font) {
 }
 
 int GfxRenderer::resolveTextFontId(const int fontId, const char* text, const EpdFontFamily::Style style) const {
-  if (fallbackFontMap_.empty() || text == nullptr || *text == '\0') {
+  if (fallbackResolver_ == nullptr || text == nullptr || *text == '\0') {
     return fontId;
   }
-  const auto fbIt = fallbackFontMap_.find(fontId);
-  if (fbIt == fallbackFontMap_.end()) {
-    return fontId;  // no fallback registered for this font
-  }
-  const int fallbackFontId = fbIt->second;
-  const auto fontIt = fontMap.find(fontId);
-  const auto fallbackIt = fontMap.find(fallbackFontId);
-  if (fontIt == fontMap.end() || fallbackIt == fontMap.end()) {
-    return fontId;  // unknown primary or fallback not loaded — let the caller handle it
-  }
-  const EpdFontFamily& primary = fontIt->second;
-  const EpdFontFamily& fallback = fallbackIt->second;
-  const char* cursor = text;
-  uint32_t cp;
-  while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&cursor)))) {
-    // Only redirect for CJK the primary font cannot draw but the fallback can.
-    // Latin/symbol strings the built-in UI fonts already cover are left
-    // untouched, and a partial-coverage fallback (e.g. kana-only) is not worth
-    // dragging the whole string into for glyphs it would also miss.
-    if (utf8IsCjkCodepoint(cp) && !primary.hasCodepoint(cp, style) && fallback.hasCodepoint(cp, style)) {
-      return fallbackFontId;
+  bool primaryRegistered = false;
+  for (const int id : fallbackPrimaryIds_) {
+    if (id != 0 && id == fontId) {
+      primaryRegistered = true;
+      break;
     }
   }
-  return fontId;
+  if (!primaryRegistered) return fontId;
+  const auto fontIt = fontMap.find(fontId);
+  if (fontIt == fontMap.end()) return fontId;
+  const EpdFontFamily& primary = fontIt->second;
+
+  // First codepoint of a fallback script the primary cannot draw decides the
+  // font for the whole string (single-script strings; a mixed-script string
+  // follows its first foreign script). Dandas are shared by every Indic
+  // script and do not pick one on their own.
+  const char* cursor = text;
+  uint32_t cp;
+  uint32_t decisive = 0;
+  ScriptBlock block = ScriptBlock::None;
+  while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&cursor)))) {
+    if (isIndicDanda(cp)) continue;
+    const ScriptBlock b = scriptBlockOf(cp);
+    if (b != ScriptBlock::None && !primary.hasCodepoint(cp, style)) {
+      decisive = cp;
+      block = b;
+      break;
+    }
+  }
+  if (block == ScriptBlock::None) return fontId;
+
+  const int fallbackFontId = fallbackResolver_(fallbackResolverCtx_, static_cast<uint8_t>(block), fontId);
+  if (fallbackFontId == 0) return fontId;
+  const auto fallbackIt = fontMap.find(fallbackFontId);
+  if (fallbackIt == fontMap.end()) return fontId;
+  // A partial-coverage fallback is not worth dragging the whole string into
+  // for glyphs it would also miss.
+  if (!fallbackIt->second.hasCodepoint(decisive, style)) return fontId;
+  return fallbackFontId;
 }
 
 // Translate logical (x,y) coordinates to physical panel coordinates based on current orientation
@@ -1039,6 +1137,27 @@ const char* resolveVisualText(const char* text, std::string& visualBuffer, const
   }
   return text;
 }
+
+// Font-dependent script shaping on top of the bidi visual text: Indic
+// syllables are reordered and their consonant clusters resolved through the
+// font's cluster table (Lipi). `buffer` may already hold `text` (the
+// bidi output); the shaped result replaces it. Measurement and drawing both
+// run this so word widths match what is drawn.
+const char* resolveShapedText(const EpdFontFamily& font, const EpdFontFamily::Style style, const char* text,
+                              std::string& buffer) {
+  if (!Lipi::mayNeedShaping(text)) return text;
+  const EpdFontData* data = font.getData(style);
+  const Lipi::ClusterTable table{data->shapeTable, data->shapeEntryCount, data->shapeKind};
+  if (text != buffer.c_str()) {
+    // The usual case (Indic text is never bidi-reordered): shape straight into
+    // the caller's buffer, no temporary string per word.
+    return Lipi::shape(text, table, buffer) ? buffer.c_str() : text;
+  }
+  std::string shaped;
+  if (!Lipi::shape(text, table, shaped)) return text;
+  buffer.swap(shaped);
+  return buffer.c_str();
+}
 }  // namespace
 
 int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontFamily::Style style,
@@ -1048,9 +1167,19 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
   }
 
   const int resolvedFontId = resolveTextFontId(fontId, text, style);
+  const auto fontIt = fontMap.find(resolvedFontId);
+  if (fontIt == fontMap.end()) {
+    LOG_ERR("GFX", "Font %d not found", resolvedFontId);
+    return 0;
+  }
+  const auto& font = fontIt->second;
 
   std::string visualBuffer;
   const char* textCursor = resolveVisualText(text, visualBuffer, baseDir);
+  textCursor = resolveShapedText(font, style, textCursor, visualBuffer);
+  if (resolvedFontId != fontId) {
+    ensureSdGlyphsResident(resolvedFontId, textCursor, style, true);
+  }
   if ((style & EpdFontFamily::SMALL_CAPS) != 0) {
     return getTextAdvanceX(resolvedFontId, textCursor, style);
   }
@@ -1060,27 +1189,17 @@ int GfxRenderer::getTextWidth(const int fontId, const char* text, const EpdFontF
   if (sdIt != sdCardFonts_.end() && sdIt->second->hasAdvanceTable()) {
     int32_t widthFP = 0;
     const uint8_t styleIdx = resolveSdCardStyle(*sdIt->second, style);
-    const auto fontIt = fontMap.find(resolvedFontId);
-    if (fontIt == fontMap.end()) {
-      LOG_ERR("GFX", "Font %d not found", resolvedFontId);
-      return 0;
-    }
-    const auto& font = fontIt->second;
     while (uint32_t cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&textCursor))) {
-      if (utf8IsVariationSelector(cp)) continue;
+      // Combining marks and variation selectors are zero-advance overlays in drawText,
+      // whatever advance the font gives their glyphs.
+      if (utf8IsCombiningMark(cp) || utf8IsVariationSelector(cp)) continue;
       widthFP += resolveSdCardAdvanceFP(*sdIt->second, font, cp, style, styleIdx);
     }
     return fp4::toPixel(widthFP);
   }
 
-  const auto fontIt = fontMap.find(resolvedFontId);
-  if (fontIt == fontMap.end()) {
-    LOG_ERR("GFX", "Font %d not found", resolvedFontId);
-    return 0;
-  }
-
   int w = 0, h = 0;
-  fontIt->second.getTextDimensions(textCursor, &w, &h, style);
+  font.getTextDimensions(textCursor, &w, &h, style);
   return w;
 }
 
@@ -1111,33 +1230,45 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
     return;
   }
 
+  // Route CJK/Bengali-bearing strings to the fallback font when the requested
+  // font lacks the glyphs (e.g. Chinese book titles drawn with a Latin UI font).
   const int resolvedFontId = resolveTextFontId(fontId, text, style);
-  const int yPos = y + getFontAscenderSize(resolvedFontId);
-  int lastBaseX = x;
-  int lastBaseLeft = 0;
-  int lastBaseWidth = 0;
-  int lastBaseTop = 0;
-  int32_t prevAdvanceFP = 0;  // 12.4 fixed-point: prev glyph's advance + next kern for snap
-
-  if (fontCacheManager_ && fontCacheManager_->isScanning()) {
-    // Prewarm the exact codepoints the real pass will draw. Arabic shaping can
-    // replace logical characters with presentation forms; recording the input
-    // text here left those visual glyphs cold and produced replacement diamonds
-    // when the SD font's on-demand path was under memory pressure.
-    std::string visualBuffer;
-    fontCacheManager_->recordText(resolveVisualText(text, visualBuffer, baseDir), resolvedFontId, style);
-    return;
-  }
-
-  std::string visualBuffer;
-  const char* textCursor = resolveVisualText(text, visualBuffer, baseDir);
-
   const auto fontIt = fontMap.find(resolvedFontId);
   if (fontIt == fontMap.end()) {
     LOG_ERR("GFX", "Font %d not found", resolvedFontId);
     return;
   }
   const auto& font = fontIt->second;
+
+  // Prewarm and draw the exact codepoints of the visual stream: Arabic shaping
+  // replaces logical characters with presentation forms and Bengali shaping
+  // with cluster glyphs; recording the input text left those glyphs cold and
+  // produced replacement diamonds when the SD font's on-demand path was under
+  // memory pressure.
+  std::string visualBuffer;
+  const char* textCursor = resolveVisualText(text, visualBuffer, baseDir);
+  textCursor = resolveShapedText(font, style, textCursor, visualBuffer);
+
+  const int yPos = y + getFontAscenderSize(resolvedFontId);
+  int lastBaseX = x;
+  int lastBaseLeft = 0;
+  int lastBaseWidth = 0;
+  int lastBaseTop = 0;
+  uint8_t lastBaseAnchorAbove = glyphAnchor::NONE;  // .cpfont v5 mark attachment points
+  uint8_t lastBaseAnchorBelow = glyphAnchor::NONE;
+  uint8_t lastBaseAnchorExtra = glyphAnchor::NONE;  // .cpfont v6 third point
+  int32_t prevAdvanceFP = 0;  // 12.4 fixed-point: prev glyph's advance + next kern for snap
+
+  if (fontCacheManager_ && fontCacheManager_->isScanning()) {
+    fontCacheManager_->recordText(textCursor, resolvedFontId, style);
+    return;
+  }
+
+  // Redirected to the SD fallback (UI strings the built-in font cannot draw):
+  // no page scan prewarmed these glyphs, so load them now.
+  if (resolvedFontId != fontId) {
+    ensureSdGlyphsResident(resolvedFontId, textCursor, style, false);
+  }
 
   uint32_t cp;
   uint32_t prevCp = 0;
@@ -1148,14 +1279,27 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
     if (utf8IsCombiningMark(cp) || BidiUtils::isTransparentMark(cp)) {
       const EpdGlyph* combiningGlyph = font.getGlyph(cp, style);
       if (!combiningGlyph) continue;
+      // The font's own attachment point when the base and the mark carry
+      // anchors (SD fonts built for v5); the anchorFor rules otherwise.
+      const bool below = combiningMark::attachesBelow(cp);
+      const int32_t anchored = glyphAnchor::markOffsetWithMode(
+          below, lastBaseAnchorAbove, lastBaseAnchorBelow, lastBaseAnchorExtra, fp4::toPixel(prevAdvanceFP),
+          combiningGlyph->anchorAbove, combiningGlyph->anchorBelow);
       const auto anchor = combiningMark::anchorFor(cp);
-      const int raiseBy =
-          combiningMark::raiseAboveBase(anchor, combiningGlyph->top, combiningGlyph->height, lastBaseTop);
-      const int combiningX = combiningMark::anchorOver(anchor, lastBaseX, lastBaseLeft, lastBaseWidth,
-                                                       combiningGlyph->left, combiningGlyph->width);
+      const int raiseBy = anchored != INT32_MIN ? 0
+                                                : combiningMark::raiseAboveBase(anchor, combiningGlyph->top,
+                                                                                combiningGlyph->height, lastBaseTop);
+      const int combiningX =
+          anchored != INT32_MIN
+              ? lastBaseX + anchored
+              : combiningMark::anchorOver(anchor, lastBaseX, lastBaseLeft, lastBaseWidth, combiningGlyph->left,
+                                          combiningGlyph->width, fp4::toPixel(prevAdvanceFP));
       renderCharImpl<TextRotation::None>(*this, renderMode, font, cp, combiningX, yPos - raiseBy, black, style);
       continue;
     }
+    lastBaseAnchorAbove = glyphAnchor::NONE;  // synthetic and missing glyphs carry no anchors
+    lastBaseAnchorBelow = glyphAnchor::NONE;
+    lastBaseAnchorExtra = glyphAnchor::NONE;
 
     const bool scaledSmallCap = isSmallCapsLowercase(style, cp);
     if (scaledSmallCap) {
@@ -1240,6 +1384,9 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
     lastBaseLeft = glyph->left;
     lastBaseWidth = glyph->width;
     lastBaseTop = glyph->top;
+    lastBaseAnchorAbove = glyph->anchorAbove;
+    lastBaseAnchorBelow = glyph->anchorBelow;
+    lastBaseAnchorExtra = static_cast<uint8_t>(glyph->anchorExtra);
     prevAdvanceFP = glyph->advanceX;  // 12.4 fixed-point
 
     const bool isSupSub = (style & (EpdFontFamily::SUP | EpdFontFamily::SUB)) != 0;
@@ -2686,6 +2833,26 @@ int GfxRenderer::getSpaceWidth(const int fontId, const EpdFontFamily::Style styl
   return spaceGlyph ? fp4::toPixel(spaceGlyph->advanceX) : 0;  // snap 12.4 fixed-point to nearest pixel
 }
 
+// A font whose danda carries built-in space that it drops after a space
+// character (Tiro: "X ।" and "X।" put the danda in the same place, as
+// HarfBuzz and browser-based readers draw it) records that space in its
+// cluster table (Lipi::dandaSpaceShare). The danda glyph keeps it, so the
+// space before a word starting with a danda gives it back. 12.4 fixed point.
+static int32_t dandaSpaceLeadFP(const EpdFontFamily* family, const SdCardFont& sdFont, const uint8_t resolvedStyle,
+                                const uint32_t rightCp, const EpdFontFamily::Style style) {
+  if (!family || !isIndicDanda(rightCp)) return 0;
+  const EpdFontData* data = family->getData(style);
+  if (!data || !data->shapeTable) return 0;
+  const Lipi::ClusterTable table{data->shapeTable, data->shapeEntryCount, data->shapeKind};
+  const uint8_t share = Lipi::dandaSpaceShare(table, rightCp);
+  if (share == 0) return 0;
+  uint16_t dandaFP = sdFont.getAdvance(rightCp, resolvedStyle);
+  if (dandaFP == 0) {
+    sdFont.readAdvance(rightCp, resolvedStyle, &dandaFP);
+  }
+  return static_cast<int32_t>(dandaFP) * share / 256;
+}
+
 int GfxRenderer::getSpaceAdvance(const int fontId, const uint32_t leftCp, const uint32_t rightCp,
                                  const EpdFontFamily::Style style) const {
   // Advance table fast-path for SD card fonts during layout.
@@ -2698,7 +2865,10 @@ int GfxRenderer::getSpaceAdvance(const int fontId, const uint32_t leftCp, const 
     if (advanceFP == 0) {
       sdIt->second->readAdvance(' ', resolvedStyle, &advanceFP);
     }
-    return fp4::toPixel(advanceFP);
+    const auto familyIt = fontMap.find(fontId);
+    const EpdFontFamily* family = familyIt != fontMap.end() ? &familyIt->second : nullptr;
+    return fp4::toPixel(static_cast<int32_t>(advanceFP) -
+                        dandaSpaceLeadFP(family, *sdIt->second, resolvedStyle, rightCp, style));
   }
 
   const auto fontIt = fontMap.find(fontId);
@@ -2731,8 +2901,16 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, const EpdFo
   // uses base-letter advances instead of presentation-form advances, so RTL
   // lines come out wider than they draw — uneven word gaps and a ragged
   // right margin.
+  const auto fontIt = fontMap.find(resolvedFontId);
+  if (fontIt == fontMap.end()) {
+    LOG_ERR("GFX", "Font %d not found", resolvedFontId);
+    return 0;
+  }
+  const auto& font = fontIt->second;
+
   std::string visual;
   text = resolveVisualText(text, visual, BidiUtils::BidiBaseDir::AUTO);
+  text = resolveShapedText(font, style, text, visual);
 
   // Advance table fast-path for SD card fonts during layout.
   // No kerning/ligature lookup — consistent with previous metadataOnly behavior
@@ -2742,16 +2920,12 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, const EpdFo
     int32_t widthFP = 0;
     const bool isSupSub = (style & (EpdFontFamily::SUP | EpdFontFamily::SUB)) != 0;
     const uint8_t styleIdx = resolveSdCardStyle(*sdIt->second, style);
-    const auto fontIt = fontMap.find(resolvedFontId);
-    if (fontIt == fontMap.end()) {
-      LOG_ERR("GFX", "Font %d not found", resolvedFontId);
-      return 0;
-    }
-    const auto& font = fontIt->second;
     uint32_t lastCp = 0;
     bool lastScaledSmallCap = false;
     while (uint32_t cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&text))) {
-      if (utf8IsVariationSelector(cp) || BidiUtils::isTransparentMark(cp)) {
+      // Variation selectors, RTL vowel marks (niqqud/harakat) and combining marks are
+      // zero-advance overlays in drawText — no width, whatever advance the font gives them.
+      if (utf8IsVariationSelector(cp) || BidiUtils::isTransparentMark(cp) || utf8IsCombiningMark(cp)) {
         continue;
       }
       const bool scaledSmallCap = isSmallCapsLowercase(style, cp);
@@ -2784,18 +2958,11 @@ int GfxRenderer::getTextAdvanceX(const int fontId, const char* text, const EpdFo
     return fp4::toPixel(widthFP);
   }
 
-  const auto fontIt = fontMap.find(resolvedFontId);
-  if (fontIt == fontMap.end()) {
-    LOG_ERR("GFX", "Font %d not found", resolvedFontId);
-    return 0;
-  }
-
   uint32_t cp;
   uint32_t prevCp = 0;
   int widthPx = 0;
   int32_t prevAdvanceFP = 0;  // 12.4 fixed-point: prev glyph's advance + next kern for snap
   bool prevScaledSmallCap = false;
-  const auto& font = fontIt->second;
   while ((cp = utf8NextCodepoint(reinterpret_cast<const uint8_t**>(&text)))) {
     // RTL vowel marks (niqqud/harakat) are zero-advance overlays in drawText — no width.
     if (utf8IsVariationSelector(cp) || BidiUtils::isTransparentMark(cp)) {
@@ -2925,10 +3092,19 @@ void GfxRenderer::drawTextRotated90CW(const int fontId, const int x, const int y
 
   const auto& font = fontIt->second;
 
+  std::string shapedBuffer;
+  text = resolveShapedText(font, style, text, shapedBuffer);
+  if (resolvedFontId != fontId) {
+    ensureSdGlyphsResident(resolvedFontId, text, style, false);
+  }
+
   int lastBaseY = y;
   int lastBaseLeft = 0;
   int lastBaseWidth = 0;
   int lastBaseTop = 0;
+  uint8_t lastBaseAnchorAbove = glyphAnchor::NONE;
+  uint8_t lastBaseAnchorBelow = glyphAnchor::NONE;
+  uint8_t lastBaseAnchorExtra = glyphAnchor::NONE;  // .cpfont v6 third point
   int32_t prevAdvanceFP = 0;  // 12.4 fixed-point: prev glyph's advance + next kern for snap
 
   uint32_t cp;
@@ -2946,15 +3122,26 @@ void GfxRenderer::drawTextRotated90CW(const int fontId, const int x, const int y
     if (utf8IsCombiningMark(cp) || BidiUtils::isTransparentMark(cp)) {
       const EpdGlyph* combiningGlyph = font.getGlyph(cp, style);
       if (!combiningGlyph) continue;
+      const bool below = combiningMark::attachesBelow(cp);
+      const int32_t anchored = glyphAnchor::markOffsetWithMode(
+          below, lastBaseAnchorAbove, lastBaseAnchorBelow, lastBaseAnchorExtra, fp4::toPixel(prevAdvanceFP),
+          combiningGlyph->anchorAbove, combiningGlyph->anchorBelow);
       const auto anchor = combiningMark::anchorFor(cp);
-      const int raiseBy =
-          combiningMark::raiseAboveBase(anchor, combiningGlyph->top, combiningGlyph->height, lastBaseTop);
+      const int raiseBy = anchored != INT32_MIN ? 0
+                                                : combiningMark::raiseAboveBase(anchor, combiningGlyph->top,
+                                                                                combiningGlyph->height, lastBaseTop);
       const int combiningX = x - raiseBy;
-      const int combiningY = combiningMark::anchorOverRotated90CW(anchor, lastBaseY, lastBaseLeft, lastBaseWidth,
-                                                                  combiningGlyph->left, combiningGlyph->width);
+      const int combiningY = anchored != INT32_MIN
+                                 ? lastBaseY - anchored
+                                 : combiningMark::anchorOverRotated90CW(anchor, lastBaseY, lastBaseLeft, lastBaseWidth,
+                                                                        combiningGlyph->left, combiningGlyph->width,
+                                                                        fp4::toPixel(prevAdvanceFP));
       renderCharImpl<TextRotation::Rotated90CW>(*this, renderMode, font, cp, combiningX, combiningY, black, style);
       continue;
     }
+    lastBaseAnchorAbove = glyphAnchor::NONE;
+    lastBaseAnchorBelow = glyphAnchor::NONE;
+    lastBaseAnchorExtra = glyphAnchor::NONE;
 
     cp = font.applyLigatures(cp, text, style);
     cp = font.getFallbackCodepoint(cp, style);
@@ -3025,6 +3212,9 @@ void GfxRenderer::drawTextRotated90CW(const int fontId, const int x, const int y
     lastBaseLeft = glyph->left;
     lastBaseWidth = glyph->width;
     lastBaseTop = glyph->top;
+    lastBaseAnchorAbove = glyph->anchorAbove;
+    lastBaseAnchorBelow = glyph->anchorBelow;
+    lastBaseAnchorExtra = static_cast<uint8_t>(glyph->anchorExtra);
     prevAdvanceFP = glyph->advanceX;  // 12.4 fixed-point
 
     renderCharImpl<TextRotation::Rotated90CW>(*this, renderMode, font, cp, x, lastBaseY, black, style);

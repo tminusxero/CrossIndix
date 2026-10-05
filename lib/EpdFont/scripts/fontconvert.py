@@ -1032,7 +1032,9 @@ def cp_label(cp):
 
 print(f"static const EpdGlyph {font_name}Glyphs[] = {{")
 for i, g in enumerate(glyph_props):
-    print ("    { " + ", ".join([f"{a}" for a in list(g[:-1])]),"},", f"// {cp_label(g.code_point)}")
+    fields = list(g[:-1])
+    fields[6:6] = [0, 0]  # anchorAbove, anchorBelow: none for built-in fonts
+    print ("    { " + ", ".join([f"{a}" for a in fields]),"},", f"// {cp_label(g.code_point)}")
 print ("};\n");
 
 print(f"static const EpdUnicodeInterval {font_name}Intervals[] = {{")

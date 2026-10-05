@@ -24,14 +24,25 @@ constexpr uint32_t SECTION_CACHE_MAGIC = 0x535843FF;  // bytes: 0xFF, "CXS"
 // must rebuild together.
 // v63: Paragraph base direction excludes direction changes from inline elements.
 // v66: Internal EPUB links preserve CSS superscript/subscript positioning.
-// v75: HTML hidden attributes suppress content in all reading modes.
-// v76: Paragraphs without source CSS indentation no longer receive a synthetic indent.
-// v77: Ordered lists, marker suppression, and list-container insets affect page layout.
-constexpr uint8_t SECTION_FILE_VERSION = 77;
+// v67: Bengali text is shaped (cluster glyphs, vowel reordering, zero-advance
+//      marks) in both measurement and drawing; cached Bengali word positions
+//      from v66 no longer match.
+// v68: Bengali vowel-sign context forms (word-initial/final, sized, fused).
+// v69: Indic cluster-table kinds 2..10 and the PUA mark classes F200/F300 are
+//      zero-advance overlays; fonts of the other Indic scripts lay out
+//      differently from the unshaped v68 caches once their shapers land.
+// v71: words spanning a parser read boundary are no longer split into two tokens.
+// v128: CrossIndix numbers its cache from 128 upwards so it never collides with
+//       upstream CrossInk (66 on v1.5.1, 76 on development in 2026-09); a cache written
+//       by either firmware is rejected by the other. 0xF6 stays the partial marker.
+// v1.6.0 merge (2026-09-24): upstream's v75-v77 layout changes (HTML hidden, no
+//       synthetic indent, ordered lists) are included without a bump, by decision:
+//       caches written by a 1.5.1-based CrossIndix build are reused as they are.
+constexpr uint8_t SECTION_FILE_VERSION = 128;
 // Suspended incremental build: valid pages plus LUTs and a parse-watermark trailer.
 // Change this with layout or payload changes so stale partial pages cannot resume
 // under a different layout contract.
-constexpr uint8_t SECTION_FILE_PARTIAL_VERSION = 0xF3;
+constexpr uint8_t SECTION_FILE_PARTIAL_VERSION = 0xF6;
 constexpr uint32_t HEADER_SIZE =
     sizeof(SECTION_CACHE_MAGIC) + sizeof(uint8_t) + sizeof(int) + sizeof(float) + sizeof(bool) + sizeof(bool) +
     sizeof(uint8_t) + sizeof(uint16_t) + sizeof(uint16_t) + sizeof(bool) + sizeof(bool) + sizeof(uint8_t) +

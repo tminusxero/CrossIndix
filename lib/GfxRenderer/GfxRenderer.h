@@ -105,18 +105,24 @@ class GfxRenderer {
   // as before, concentrated in a single pointer instead of four fields.
   mutable FontCacheManager* fontCacheManager_ = nullptr;
 
-  // CJK UI font fallback map: primary (built-in, Latin-only) UI font id -> a
-  // size-matched SD-card font id that carries CJK glyphs. When a string drawn
-  // or measured with a mapped primary font contains a CJK codepoint the primary
-  // cannot render, the whole string is routed to the mapped fallback so it
-  // appears at the same point size as the surrounding UI text. Populated by the
-  // app-level SD font setup when an SD family is loaded. See resolveTextFontId().
-  std::map<int, int> fallbackFontMap_;
+  // UI font fallback by script. The built-in UI fonts are Latin/Cyrillic/
+  // Greek/Hebrew/Arabic only; when a string drawn or measured with one of the
+  // registered primary UI font ids contains a codepoint of a script block the
+  // primary cannot render (see ScriptBlock.h), the app-level resolver is asked
+  // for a size-matched SD-card font id covering that script and the whole
+  // string is routed to it. The resolver may load the font lazily. See
+  // resolveTextFontId().
+  using FallbackResolverFn = int (*)(void* ctx, uint8_t scriptBlock, int primaryFontId);
+  FallbackResolverFn fallbackResolver_ = nullptr;
+  void* fallbackResolverCtx_ = nullptr;
+  static constexpr uint8_t kMaxFallbackPrimaries = 4;
+  int fallbackPrimaryIds_[kMaxFallbackPrimaries] = {0, 0, 0, 0};
 
-  // If `text` contains a CJK codepoint that `fontId` cannot render and `fontId`
-  // has a registered fallback, returns the fallback id; otherwise returns
-  // fontId unchanged. The whole string is routed as a unit so each draw/measure
-  // call stays single-font (consistent bit depth, metrics, wrapping).
+  // If `text` contains a fallback-script codepoint that `fontId` cannot render
+  // and the resolver provides a font for that script, returns that font id;
+  // otherwise returns fontId unchanged. The whole string is routed as a unit
+  // so each draw/measure call stays single-font (consistent bit depth,
+  // metrics, wrapping).
   int resolveTextFontId(int fontId, const char* text, EpdFontFamily::Style style) const;
   void renderChar(const EpdFontFamily& fontFamily, uint32_t cp, int* x, int* y, bool pixelState,
                   EpdFontFamily::Style style) const;
@@ -171,16 +177,26 @@ class GfxRenderer {
   void setFontCacheManager(FontCacheManager* m) { fontCacheManager_ = m; }
   FontCacheManager* getFontCacheManager() const { return fontCacheManager_; }
   bool isFontCacheScanning() const;
+
+  // Batch-load the SD glyphs of a string redirected to the SD fallback font
+  // (see resolveTextFontId) so the draw/measure loop does not fault them in
+  // one SD read at a time, and so getFallbackCodepoint() finds them resident.
+  void ensureSdGlyphsResident(int fontId, const char* text, EpdFontFamily::Style style, bool metadataOnly) const;
   const std::map<int, EpdFontFamily>& getFontMap() const { return fontMap; }
   void registerSdCardFont(int fontId, SdCardFont* font) { sdCardFonts_[fontId] = font; }
   void unregisterSdCardFont(int fontId) { removeFont(fontId); }
   void clearSdCardFonts() { sdCardFonts_.clear(); }
   const std::map<int, SdCardFont*>& getSdCardFonts() const { return sdCardFonts_; }
   bool isSdCardFont(int fontId) const { return sdCardFonts_.count(fontId) > 0; }
-  // Register/clear size-matched CJK UI fallbacks (see fallbackFontMap_).
-  // setFallbackFont maps a primary UI font id to an SD font id of the same size.
-  void setFallbackFont(int primaryFontId, int fallbackFontId) { fallbackFontMap_[primaryFontId] = fallbackFontId; }
-  void clearFallbackFonts() { fallbackFontMap_.clear(); }
+  // Register the script fallback resolver and the primary UI font ids it
+  // serves (see fallbackResolver_). Strings drawn with any other font id are
+  // never redirected.
+  void setFallbackResolver(FallbackResolverFn fn, void* ctx, const int* primaryIds, uint8_t count) {
+    fallbackResolver_ = fn;
+    fallbackResolverCtx_ = ctx;
+    for (uint8_t i = 0; i < kMaxFallbackPrimaries; i++) fallbackPrimaryIds_[i] = i < count ? primaryIds[i] : 0;
+  }
+  void clearFallbackResolver() { setFallbackResolver(nullptr, nullptr, nullptr, 0); }
   // Ensure SD card font glyph data is loaded for the given text. Called from layout code
   // (which holds a const GfxRenderer&) before measuring word widths. Safe to call on non-SD fonts (no-op).
   // styleMask: bitmask of styles to prepare (bit 0=regular, 1=bold, 2=italic, 3=bold-italic).

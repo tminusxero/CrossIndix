@@ -26,6 +26,7 @@ set(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 
 add_library(crosspoint_test_common INTERFACE)
 target_include_directories(crosspoint_test_common INTERFACE
+  ${REPO_ROOT}/lipi/engine
   ${REPO_ROOT}
   ${REPO_ROOT}/lib
   ${REPO_ROOT}/lib/MemoryBudget
@@ -73,6 +74,10 @@ add_subdirectory(stable_page_navigation)
 add_subdirectory(touch_reader_preview)
 add_subdirectory(dictionary_word_parts)
 add_subdirectory(ligature_guard)
+# The Lipi engine and its providers test themselves; their CMake file reuses this
+# project's GoogleTest when it is already a target.
+add_subdirectory(${REPO_ROOT}/lipi/test lipi_tests)
+add_subdirectory(script_fallback)
 add_subdirectory(chapter_html_slim_parser)
 add_subdirectory(input_release_guard)
 add_subdirectory(release_suppression)

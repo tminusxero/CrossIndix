@@ -5,3 +5,6 @@
 [submodule "assets/tabler-icons"]
 	path = assets/tabler-icons
 	url = https://github.com/tabler/tabler-icons.git
+[submodule "lipi"]
+	path = lipi
+	url = https://github.com/tminusxero/Lipi.git

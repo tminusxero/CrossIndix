@@ -2,6 +2,7 @@ add_executable(FontCacheManagerTest
   FontCacheManagerTest.cpp
   ${REPO_ROOT}/lib/GfxRenderer/FontCacheManager.cpp
   ${REPO_ROOT}/lib/Utf8/Utf8.cpp
+  ${REPO_ROOT}/lipi/engine/Lipi.cpp  # the mark queries of LipiMarks.h live in the engine
 )
 
 target_include_directories(FontCacheManagerTest PRIVATE

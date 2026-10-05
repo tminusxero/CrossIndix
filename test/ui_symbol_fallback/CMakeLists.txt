@@ -1,6 +1,7 @@
 add_executable(UiSymbolFallbackTest
   UiSymbolFallbackTest.cpp
   ${REPO_ROOT}/lib/EpdFont/EpdFont.cpp
+  ${REPO_ROOT}/lipi/engine/Lipi.cpp  # the mark queries of LipiMarks.h live in the engine
   ${REPO_ROOT}/lib/EpdFont/EpdFontFamily.cpp
   ${REPO_ROOT}/lib/Utf8/Utf8.cpp
 )

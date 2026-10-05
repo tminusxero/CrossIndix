@@ -2,6 +2,9 @@
 // https://github.com/vroland/epdiy/blob/c61e9e923ce2418150d54f88cea5d196cdc40c54/src/epd_internals.h
 
 #pragma once
+#include <LipiMarks.h>
+
+#include <climits>
 #include <cstdint>
 
 /// Font metrics use "fixed-point 4" (4 fractional bits, i.e. 1/16-pixel
@@ -48,9 +51,27 @@ enum class Anchor : uint8_t {
   CenterNative,  ///< centered over the base at font-native height
   RightNative,   ///< right edges aligned, font-native height
   LeftNative,    ///< left edges aligned, font-native height
+  PenNative,     ///< at the pen position after the base (its advance), font-native height
 };
 
-constexpr Anchor anchorFor(const uint32_t cp) {
+/// Marks that hang below their base take the base's below anchor; every
+/// other combining mark (signs and modifiers above, the reph) the above one.
+/// The Indic marks and the shaped-cluster PUA classes come from the Lipi
+/// descriptors (lipi/providers/*/descriptor.h).
+inline bool attachesBelow(const uint32_t cp) { return Lipi::attachesBelow(cp); }
+
+inline Anchor anchorFor(const uint32_t cp) {
+  // Indic marks and the PUA cluster marks: the engine's anchor class.
+  switch (Lipi::anchorClass(cp)) {
+    case Lipi::MarkAnchor::Center:
+      return Anchor::CenterNative;
+    case Lipi::MarkAnchor::Right:
+      return Anchor::RightNative;
+    case Lipi::MarkAnchor::Pen:
+      return Anchor::PenNative;
+    case Lipi::MarkAnchor::None:
+      break;
+  }
   switch (cp) {
     case 0x05BC:  // dagesh / mapiq / shuruk dot: inside the letter body
     case 0x05BA:  // holam haser for vav: straight above the vav stem
@@ -81,7 +102,8 @@ constexpr int anchorShift(const Anchor anchor, const int baseWidth, const int ma
 /// Compute the cursor-X at which to render a combining mark so its bitmap
 /// lands at its anchor position over the base glyph's bitmap.
 constexpr int anchorOver(const Anchor anchor, const int baseCursorPos, const int baseLeft, const int baseWidth,
-                         const int markLeft, const int markWidth) {
+                         const int markLeft, const int markWidth, const int baseAdvance = 0) {
+  if (anchor == Anchor::PenNative) return baseCursorPos + baseAdvance;  // the mark keeps its own bearing
   return baseCursorPos + baseLeft + anchorShift(anchor, baseWidth, markWidth) - markLeft;
 }
 
@@ -89,7 +111,9 @@ constexpr int anchorOver(const Anchor anchor, const int baseCursorPos, const int
 /// renderCharImpl uses (cursorY - left) instead of (cursorX + left), so
 /// every left/width term inverts sign.
 constexpr int anchorOverRotated90CW(const Anchor anchor, const int baseCursorPos, const int baseLeft,
-                                    const int baseWidth, const int markLeft, const int markWidth) {
+                                    const int baseWidth, const int markLeft, const int markWidth,
+                                    const int baseAdvance = 0) {
+  if (anchor == Anchor::PenNative) return baseCursorPos - baseAdvance;
   return baseCursorPos - baseLeft - anchorShift(anchor, baseWidth, markWidth) + markLeft;
 }
 
@@ -135,8 +159,66 @@ typedef struct {
   int16_t left;         ///< X dist from cursor pos to UL corner
   int16_t top;          ///< Y dist from cursor pos to UL corner
   uint16_t dataLength;  ///< Size of the font data.
-  uint32_t dataOffset;  ///< Pointer into EpdFont->bitmap (or within-group offset for compressed fonts)
+  uint8_t anchorAbove;  ///< Mark attachment x (see glyphAnchor); base: above anchor, mark: value or mode
+  uint8_t anchorBelow;  ///< Base: below anchor, mark: value or mode (see glyphAnchor); 0 = none
+  uint32_t dataOffset : 24;  ///< Offset into EpdFont->bitmap (or within-group offset for compressed fonts)
+  uint32_t anchorExtra : 8;  ///< Base: a third attachment point (.cpfont v6); 0 = none (built-in, v4, v5)
 } EpdGlyph;
+
+/// Mark attachment points (.cpfont v5/v6, EpdGlyph::anchorAbove/anchorBelow/
+/// anchorExtra), derived from the font's GPOS mark-to-base positioning by
+/// the SD font builder. A base glyph stores where an above / below mark's
+/// origin goes, as an x offset from the base cursor (v6 adds a third point,
+/// anchorExtra, for the mark the font attaches elsewhere: Tiro Sanskrit's
+/// anusvara, Noto Serif Bengali's ba-phala). A mark glyph stores its own
+/// anchor as an x offset from its origin in the byte of its class
+/// (combiningMark::attachesBelow) and, in v6, a placement mode in the other
+/// byte: which base point the value is measured from. Units are half pixels,
+/// biased by 128 so that 0 means "no anchor" (built-in fonts, v4 files,
+/// glyphs no mark attaches to); then the renderer falls back to the
+/// anchorFor rules. A v5 mark has 0 in its other byte = Mode::CLASS_ANCHOR.
+namespace glyphAnchor {
+constexpr uint8_t NONE = 0;
+constexpr int BIAS = 128;
+
+/// Mark placement modes (the byte of the mark's other class).
+enum Mode : uint8_t {
+  CLASS_ANCHOR = 0,  ///< value is measured from the base anchor of the mark's class (v5)
+  PEN = 1,           ///< value is measured from the base's advance (nukta, hasanta in Hind Siliguri)
+  OTHER_CLASS = 2,   ///< value is measured from the base anchor of the other class (Noto Sans phalas)
+  EXTRA = 3,         ///< value is measured from the base's anchorExtra point
+};
+
+constexpr int halfToPx(const int halfPx) { return halfPx >= 0 ? (halfPx + 1) / 2 : -((-halfPx + 1) / 2); }
+
+/// Pixel offset from the base cursor to the mark cursor, or INT32_MIN when
+/// either side has no anchor.
+constexpr int32_t markOffset(const uint8_t baseAnchor, const uint8_t markAnchor) {
+  if (baseAnchor == NONE || markAnchor == NONE) return INT32_MIN;
+  return halfToPx((static_cast<int>(baseAnchor) - BIAS) - (static_cast<int>(markAnchor) - BIAS));
+}
+
+/// Pixel offset from the base cursor to the mark cursor for a mark with a
+/// placement mode: `below` is the mark's class, `baseAbove/baseBelow/baseExtra`
+/// the base's points, `baseAdvancePx` its advance in pixels, `markAbove/markBelow`
+/// the mark's two bytes. INT32_MIN when the needed point is missing.
+constexpr int32_t markOffsetWithMode(const bool below, const uint8_t baseAbove, const uint8_t baseBelow,
+                                     const uint8_t baseExtra, const int baseAdvancePx, const uint8_t markAbove,
+                                     const uint8_t markBelow) {
+  const uint8_t value = below ? markBelow : markAbove;
+  const uint8_t mode = below ? markAbove : markBelow;
+  switch (mode) {
+    case PEN:
+      return value == NONE ? INT32_MIN : baseAdvancePx + halfToPx(static_cast<int>(value) - BIAS);
+    case OTHER_CLASS:
+      return markOffset(below ? baseAbove : baseBelow, value);
+    case EXTRA:
+      return markOffset(baseExtra, value);
+    default:
+      return markOffset(below ? baseBelow : baseAbove, value);
+  }
+}
+}  // namespace glyphAnchor
 
 /// Compressed font group: a DEFLATE-compressed block of glyph bitmaps
 typedef struct {
@@ -207,6 +289,15 @@ typedef struct {
   uint8_t kernRightClassCount;           ///< Number of distinct right classes (matrix cols)
   const EpdLigaturePair* ligaturePairs;  ///< Sorted ligature pair table (nullptr if none)
   uint32_t ligaturePairCount;            ///< Number of entries in ligaturePairs
+
+  /// Script cluster table written by the font builder (SD-card fonts only,
+  /// nullptr for the built-ins). shapeKind selects the shaper that reads it
+  /// (Lipi::SHAPE_KIND_*); entries are Lipi::entrySizeForKind
+  /// bytes each, sorted for binary search, and stay resident for the font's
+  /// lifetime (a few KB).
+  const uint8_t* shapeTable;
+  uint16_t shapeEntryCount;
+  uint8_t shapeKind;
 
   /// On-demand glyph loading for fonts that don't keep all glyphs in RAM (e.g. SD card fonts).
   /// Called by getGlyph() when a codepoint is not found in the interval table.
