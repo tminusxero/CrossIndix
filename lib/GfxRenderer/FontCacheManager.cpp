@@ -39,8 +39,13 @@ void FontCacheManager::setFontDecompressor(FontDecompressor* d) { fontDecompress
 
 void FontCacheManager::clearCache() {
   if (fontDecompressor_) fontDecompressor_->clearCache();
+  // One heap reading for every font: each decides whether to keep its mini
+  // glyph data on the same figures, not on the heap the fonts before it in
+  // the map just released (see SdCardFont::clearCache).
+  const size_t freeHeap = ESP.getFreeHeap();
+  const size_t maxAllocHeap = ESP.getMaxAllocHeap();
   for (auto& [id, font] : sdCardFonts_) {
-    font->clearCache();
+    font->clearCache(freeHeap, maxAllocHeap);
   }
 }
 

@@ -158,8 +158,8 @@ void SdCardFont::freeStyleMiniData(PerStyle& s) {
   s.epdFont.data = &s.stubData;
 }
 
-void SdCardFont::resetStyleMiniData(PerStyle& s) {
-  if (ESP.getFreeHeap() < MINI_RETAIN_MIN_FREE_HEAP || ESP.getMaxAllocHeap() < MINI_RETAIN_MIN_MAX_ALLOC_HEAP) {
+void SdCardFont::resetStyleMiniData(PerStyle& s, const size_t freeHeap, const size_t maxAllocHeap) {
+  if (freeHeap < MINI_RETAIN_MIN_FREE_HEAP || maxAllocHeap < MINI_RETAIN_MIN_MAX_ALLOC_HEAP) {
     freeStyleMiniData(s);
     return;
   }
@@ -1419,14 +1419,16 @@ int SdCardFont::prewarmStyle(uint8_t styleIdx, const uint32_t* codepoints, uint3
 
 // --- Cache management ---
 
-void SdCardFont::clearCache() {
+void SdCardFont::clearCache() { clearCache(ESP.getFreeHeap(), ESP.getMaxAllocHeap()); }
+
+void SdCardFont::clearCache(const size_t freeHeap, const size_t maxAllocHeap) {
   clearOverflow();
   // Note: advance table is intentionally preserved here. It persists across
   // layout passes so repeated section indexing amortizes SD reads. Use
   // clearPersistentCache() to wipe it.
   for (uint8_t i = 0; i < MAX_STYLES; i++) {
     if (!styles_[i].present) continue;
-    resetStyleMiniData(styles_[i]);
+    resetStyleMiniData(styles_[i], freeHeap, maxAllocHeap);
     applyGlyphMissCallback(i);
   }
 }
