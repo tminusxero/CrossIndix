@@ -717,37 +717,35 @@ if (parsedSize != fileSize) {
 }
 ```
 
-## `.cpfont` glyph record and mark anchors (versions 5 and 6)
+## `.cpfont` glyph record and mark anchors (CrossIndix format, version 128)
+
+CrossIndix numbers its font format from 128 so it never meets CrossInk's sequence: the
+loader accepts CrossInk's version 4 (loaded as is, no mark anchors) and 128, nothing else
+(`SdCardFont.h`, `isSupportedCpfontVersion`; the converter writes 128, `cpfont_version.py`).
 
 Each glyph record is 16 bytes: `u8 width, u8 height, u16 advanceX (12.4), i16 left, i16 top,
 u16 dataLength, u8 anchorAbove, u8 anchorBelow, u24 dataOffset, u8 anchorExtra`. Version 4
-files carry zeros in bytes 10-11 (padding) and still load; version 5 files written by
+files carry zeros in bytes 10-11 and 15 and still load; CrossIndix files written by
 `fontconvert_sdcard.py --shape` fill them with the font's mark attachment points, read off
 HarfBuzz's GPOS mark-to-base positioning (`lipi/builder/shaping.py`, `compute_anchors`):
 
 - a base glyph (letter, vowel sign, PUA composite) stores where an above / below mark's
-  origin lands, as an x offset from the base cursor;
+  origin lands, as an x offset from the base cursor, and in byte 15 (the top byte of the
+  former `u32 dataOffset`; bitmap offsets stay below 16 MB) a third point, `anchorExtra`,
+  for a mark the font attaches somewhere else than the class probe (Tiro Devanagari
+  Sanskrit's anusvara, Noto Serif Bengali's ba-phala, Hind Siliguri's nukta and hasanta);
 - a mark glyph stores its own anchor, as an x offset from its origin, in the byte of its
-  class (`combiningMark::attachesBelow` decides above or below);
+  class (`combiningMark::attachesBelow` decides above or below), and its placement mode in
+  the other byte: 0 = value measured from the base anchor of its class, 1 = from the base's
+  advance (pen), 2 = from the other class's base anchor, 3 = from `anchorExtra`. The builder
+  picks per mark and font the mode with the smallest residual, and the `anchorExtra` probe
+  with the largest gain;
 - units are half pixels at the file's size, biased by 128; 0 means no anchor.
-
-Version 6 (2026-09-19) adds a third base point and per-mark placement modes, so a mark the
-font attaches somewhere else than the class probe (Tiro Devanagari Sanskrit's anusvara,
-Noto Serif Bengali's ba-phala, Hind Siliguri's nukta and hasanta) lands where HarfBuzz puts
-it:
-
-- byte 15, the top byte of the former `u32 dataOffset`, is `anchorExtra` on a base glyph
-  (bitmap offsets stay below 16 MB; v4/v5 files read as 0 = none);
-- a mark glyph's other-class byte is its mode: 0 = value measured from the base anchor of
-  its class (the v5 rule), 1 = from the base's advance (pen), 2 = from the other class's
-  base anchor, 3 = from `anchorExtra`. The builder picks per mark and font the mode with the
-  smallest residual, and the `anchorExtra` probe with the largest gain.
 
 The renderer draws a mark at `base cursor + (basePoint - markAnchor) / 2` when both bytes
 are set (`glyphAnchor::markOffsetWithMode`) and falls back to the `anchorFor` rules
-otherwise (built-in fonts, v4 files, glyphs the probe marks never attach to). Pairs the
-font draws as one glyph are cluster-table composites and need no anchor. Firmware up to
-a7bd72f4 (v5) refuses v6 files; v6 firmware loads v4, v5 and v6.
+otherwise (built-in fonts, version 4 files, glyphs the probe marks never attach to). Pairs
+the font draws as one glyph are cluster-table composites and need no anchor.
 
 ## `.cpfont` cluster table
 

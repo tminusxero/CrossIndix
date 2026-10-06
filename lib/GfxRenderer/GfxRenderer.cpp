@@ -1254,10 +1254,10 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
   int lastBaseLeft = 0;
   int lastBaseWidth = 0;
   int lastBaseTop = 0;
-  uint8_t lastBaseAnchorAbove = glyphAnchor::NONE;  // .cpfont v5 mark attachment points
+  uint8_t lastBaseAnchorAbove = glyphAnchor::NONE;  // CrossIndix .cpfont mark attachment points
   uint8_t lastBaseAnchorBelow = glyphAnchor::NONE;
-  uint8_t lastBaseAnchorExtra = glyphAnchor::NONE;  // .cpfont v6 third point
-  int32_t prevAdvanceFP = 0;  // 12.4 fixed-point: prev glyph's advance + next kern for snap
+  uint8_t lastBaseAnchorExtra = glyphAnchor::NONE;  // the base's third point
+  int32_t prevAdvanceFP = 0;                        // 12.4 fixed-point: prev glyph's advance + next kern for snap
 
   if (fontCacheManager_ && fontCacheManager_->isScanning()) {
     fontCacheManager_->recordText(textCursor, resolvedFontId, style);
@@ -1280,7 +1280,7 @@ void GfxRenderer::drawText(const int fontId, const int x, const int y, const cha
       const EpdGlyph* combiningGlyph = font.getGlyph(cp, style);
       if (!combiningGlyph) continue;
       // The font's own attachment point when the base and the mark carry
-      // anchors (SD fonts built for v5); the anchorFor rules otherwise.
+      // anchors (SD fonts in the CrossIndix format); the anchorFor rules otherwise.
       const bool below = combiningMark::attachesBelow(cp);
       const int32_t anchored = glyphAnchor::markOffsetWithMode(
           below, lastBaseAnchorAbove, lastBaseAnchorBelow, lastBaseAnchorExtra, fp4::toPixel(prevAdvanceFP),
@@ -3104,8 +3104,8 @@ void GfxRenderer::drawTextRotated90CW(const int fontId, const int x, const int y
   int lastBaseTop = 0;
   uint8_t lastBaseAnchorAbove = glyphAnchor::NONE;
   uint8_t lastBaseAnchorBelow = glyphAnchor::NONE;
-  uint8_t lastBaseAnchorExtra = glyphAnchor::NONE;  // .cpfont v6 third point
-  int32_t prevAdvanceFP = 0;  // 12.4 fixed-point: prev glyph's advance + next kern for snap
+  uint8_t lastBaseAnchorExtra = glyphAnchor::NONE;  // the base's third point
+  int32_t prevAdvanceFP = 0;                        // 12.4 fixed-point: prev glyph's advance + next kern for snap
 
   uint32_t cp;
   uint32_t prevCp = 0;

@@ -162,7 +162,7 @@ def resolve_intervals(preset_str):
 GlyphProps = namedtuple("GlyphProps", [
     "width", "height", "advance_x", "left", "top", "data_length", "data_offset", "code_point",
     "anchor_above", "anchor_below",  # mark attachment bytes (indic_shaping.anchors); 0 = none
-    "anchor_extra"  # v6: a base's third attachment point, packed into the data offset's top byte
+    "anchor_extra"  # a base's third attachment point, packed into the data offset's top byte
 ], defaults=(0, 0, 0))
 
 # Intermediate data from rasterizing one font style
@@ -996,14 +996,14 @@ def rasterize_font_style(fontfile, size, intervals, style_id=0, force_autohint=F
 # --- Binary packing helpers ---
 
 # EpdGlyph struct: 16 bytes, little-endian
-GLYPH_STRUCT_FORMAT = "<BBHhhHBBI"  # v5: bytes 10-11 are the mark anchors (v4: padding); v6: byte 15 (the
-# top byte of the 32-bit data offset, offsets stay below 16 MB) is a base's third anchor
+GLYPH_STRUCT_FORMAT = "<BBHhhHBBI"  # bytes 10-11 are the mark anchors (padding in CrossInk's version 4);
+# byte 15 (the top byte of the 32-bit data offset, offsets stay below 16 MB) is a base's third anchor
 assert struct.calcsize(GLYPH_STRUCT_FORMAT) == 16
 
 
 def pack_data_offset(data_offset, anchor_extra):
     """The glyph record's last field: the 24-bit bitmap offset with a base's
-    third anchor in the top byte (v6). Both are range-checked: an offset past
+    third anchor in the top byte. Both are range-checked: an offset past
     16 MB would silently land in the anchor byte, and the reader has no way
     to tell."""
     if not 0 <= data_offset < (1 << 24):
@@ -1066,7 +1066,7 @@ def style_sections_total_size(sections):
 def generate_cpfont_multistyle(style_fonts, size, intervals, output_path,
                                force_autohint=False, fallback_style_fonts=None,
                                fallback_style_intervals=None, darken_aa=False, shaping=None):
-    """Generate a multi-style v4 .cpfont file.
+    """Generate a multi-style .cpfont file (CrossIndix format, CPFONT_VERSION).
 
     style_fonts: dict of {style_id: fontfile_path} e.g. {0: "Regular.ttf", 2: "Italic.ttf"}
     fallback_style_fonts: optional dict of {style_id: [fallback_fontfile_path]}
@@ -1175,7 +1175,7 @@ def generate_cpfont_multistyle(style_fonts, size, intervals, output_path,
         total_file_size = f.tell()
 
     # Print summary
-    print(f"  Output: {output_path} (v4, {style_count} styles)", file=sys.stderr)
+    print(f"  Output: {output_path} (format {CPFONT_VERSION}, {style_count} styles)", file=sys.stderr)
     print(f"    Header+TOC: {HEADER_SIZE + len(toc_data)} bytes", file=sys.stderr)
     for style_id in sorted(raster_data.keys()):
         sd = raster_data[style_id]
@@ -1225,9 +1225,9 @@ def main():
                         help="Script shaping to pre-compute into the font (default: auto — the script "
                              "whose block the intervals cover). Requires uharfbuzz.")
 
-    # Multi-style mode: per-style font file arguments (generates v4 .cpfont)
+    # Multi-style mode: per-style font file arguments
     parser.add_argument("--regular", dest="font_regular",
-                        help="Font file for regular style (enables multi-style v4 mode).")
+                        help="Font file for regular style (enables multi-style mode).")
     parser.add_argument("--bold", dest="font_bold",
                         help="Font file for bold style.")
     parser.add_argument("--italic", dest="font_italic",
@@ -1366,11 +1366,11 @@ def main():
         font_name = base
 
     if not is_multistyle:
-        # Single font file provided: wrap as a single-style v4 font
+        # Single font file provided: wrap as a single-style font
         style_map = {"regular": 0, "bold": 1, "italic": 2, "bolditalic": 3}
         style_fonts[style_map[args.style]] = fontfile
 
-    # Always generate v4 format
+    # Always the multi-style container
     if args.output and len(sizes) != 1:
         print("Error: --output can only be used with a single size", file=sys.stderr)
         sys.exit(1)
@@ -1382,7 +1382,7 @@ def main():
         else:
             filename = f"{font_name}_{sz}.cpfont"
             output_path = os.path.join(output_dir, filename)
-        print(f"Generating {output_path} (size {sz}, {len(style_fonts)} style(s), v4)...", file=sys.stderr)
+        print(f"Generating {output_path} (size {sz}, {len(style_fonts)} style(s), format {CPFONT_VERSION})...", file=sys.stderr)
         total_size += generate_cpfont_multistyle(
             style_fonts, sz, intervals, output_path,
             force_autohint=args.force_autohint,

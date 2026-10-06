@@ -69,7 +69,7 @@ TEST(AnchorOver, HorizontalPlacementPerAnchor) {
 
 TEST(CombiningMarkAnchor, GlyphAnchorsGiveTheFontsOwnPlacement) {
   using namespace glyphAnchor;
-  EXPECT_EQ(markOffset(NONE, 130), INT32_MIN);  // v4 file or built-in font: rules apply
+  EXPECT_EQ(markOffset(NONE, 130), INT32_MIN);  // CrossInk version 4 file or built-in font: rules apply
   EXPECT_EQ(markOffset(130, NONE), INT32_MIN);
   EXPECT_EQ(markOffset(128 + 40, 128 + 0), 20);    // base anchor 20 px, mark anchor 0
   EXPECT_EQ(markOffset(128 + 41, 128 + 0), 21);    // 20.5 px rounds away from zero
@@ -87,14 +87,14 @@ TEST(CombiningMarkAnchor, GlyphAnchorsGiveTheFontsOwnPlacement) {
   EXPECT_EQ(anchorOver(Anchor::RightNative, 100, 1, 12, 2, 4), 109 - 2);
 }
 
-// .cpfont v6: a mark's other-class byte selects which base point its value
-// is measured from; a v5 mark (other byte 0) keeps the class anchor.
+// CrossIndix .cpfont: a mark's other-class byte selects which base point its
+// value is measured from; mode 0 keeps the class anchor.
 TEST(CombiningMarkAnchor, PlacementModesPickTheBasePoint) {
   using namespace glyphAnchor;
   const uint8_t above = 128 + 40, below = 128 + 10, extra = 128 + 60;  // 20 / 5 / 30 px
-  // Above mark, v5 layout: value in anchorAbove, 0 in anchorBelow.
+  // Above mark, class mode: value in anchorAbove, 0 in anchorBelow.
   EXPECT_EQ(markOffsetWithMode(false, above, below, extra, 17, 128 + 0, CLASS_ANCHOR), 20);
-  // Below mark, v5 layout.
+  // Below mark, class mode.
   EXPECT_EQ(markOffsetWithMode(true, above, below, extra, 17, CLASS_ANCHOR, 128 + 4), 3);
   // Pen mode: value is half pixels from the base advance (17 px + 2 px).
   EXPECT_EQ(markOffsetWithMode(true, above, below, extra, 17, PEN, 128 + 4), 19);

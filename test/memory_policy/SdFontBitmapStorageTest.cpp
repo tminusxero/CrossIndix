@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include <HalStorage.h>
-#include <SdCardFont.h>
 #include <Lipi.h>
+#include <SdCardFont.h>
 #include <ShapeTableCache.h>
 #include <gtest/gtest.h>
 
@@ -58,6 +58,25 @@ struct SdFontBitmapStorageTest : testing::Test {
     Storage.reset();
   }
 };
+TEST_F(SdFontBitmapStorageTest, LoadsUpstreamAndOwnFormatVersionsOnly) {
+  // CrossInk's version 4 and the CrossIndix format load; the numbers in
+  // between (CrossInk's future, and this project's pre-release formats) do not.
+  for (const uint16_t version : {uint16_t{CPFONT_UPSTREAM_VERSION}, uint16_t{CPFONT_VERSION}}) {
+    auto bytes = fixture();
+    put16(bytes, 8, version);
+    Storage.put("v.cpfont", bytes);
+    SdCardFont font;
+    EXPECT_TRUE(font.load("v.cpfont")) << "version " << version;
+  }
+  for (const uint16_t version : {uint16_t{3}, uint16_t{5}, uint16_t{6}, uint16_t{127}, uint16_t{129}}) {
+    auto bytes = fixture();
+    put16(bytes, 8, version);
+    Storage.put("v.cpfont", bytes);
+    SdCardFont font;
+    EXPECT_FALSE(font.load("v.cpfont")) << "version " << version;
+  }
+}
+
 TEST_F(SdFontBitmapStorageTest, ProductionLoadGrowRetainReleaseAndReload) {
   SdCardFont font;
   ASSERT_TRUE(font.load("font.cpfont"));

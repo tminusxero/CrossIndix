@@ -20,8 +20,16 @@
 // lib/EpdFont/scripts/cpfont_version.py. This firmware-side copy must be
 // bumped manually when the firmware is updated to support a new format.
 // Reader enforcement: SdCardFont::load().
-#define CPFONT_VERSION 6  // 6: third base anchor in the data offset's top byte, mark placement modes
-#define CPFONT_MIN_VERSION 4  // v4 files load with no mark anchors
+// CrossIndix numbers its format from 128 so it never meets CrossInk's sequence:
+// a file is either CrossInk's version 4 (loaded as is, no mark anchors) or ours.
+// 128: glyph records carry mark anchors (bytes 10-11), a base's third attachment
+// point (byte 15, the top byte of the data offset) and per-mark placement modes.
+#define CPFONT_VERSION 128
+#define CPFONT_UPSTREAM_VERSION 4
+
+inline bool isSupportedCpfontVersion(const uint16_t version) {
+  return version == CPFONT_UPSTREAM_VERSION || version == CPFONT_VERSION;
+}
 
 class SdCardFont {
  public:
@@ -38,7 +46,7 @@ class SdCardFont {
   SdCardFont& operator=(SdCardFont&&) = delete;
 
   // Load .cpfont file: reads header + intervals into RAM, records file layout offsets.
-  // Supports v4 (multi-style) format.
+  // Supports CrossInk's version 4 and the CrossIndix format (multi-style container).
   // Returns true on success.
   bool load(const char* path);
 
