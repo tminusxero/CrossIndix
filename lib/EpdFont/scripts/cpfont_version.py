@@ -9,7 +9,7 @@
 # support a new version.
 
 # .cpfont binary format version. Bump when the on-disk struct layout changes.
-CPFONT_VERSION = 6  # 5: glyph records carry mark anchors (bytes 10-11); 6: third anchor (byte 15), mark modes
+CPFONT_VERSION = 128  # CrossIndix format (mark anchors, third base point, placement modes); numbered from 128 so it never meets CrossInk's sequence, whose version 4 files still load
 
 # JSON manifest schema version. Bump when the manifest shape changes.
 FONTS_MANIFEST_VERSION = 1

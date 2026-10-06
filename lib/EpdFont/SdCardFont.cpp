@@ -18,8 +18,8 @@
 
 static_assert(sizeof(EpdGlyph) == 16, "EpdGlyph must be 16 bytes to match .cpfont file layout");
 static_assert(offsetof(EpdGlyph, anchorAbove) == 10 && offsetof(EpdGlyph, anchorBelow) == 11,
-              "EpdGlyph anchors sit in the bytes v4 files left as padding; the v6 third anchor is the top\n"
-              "byte of the 32-bit data offset field (bytes 12-15), zero in v4/v5 files");
+              "EpdGlyph anchors sit in the bytes CrossInk's version 4 files leave as padding; the third anchor\n"
+              "is the top byte of the 32-bit data offset field (bytes 12-15), zero in version 4 files");
 static_assert(sizeof(EpdUnicodeInterval) == 12, "EpdUnicodeInterval must be 12 bytes to match .cpfont file layout");
 static_assert(sizeof(EpdKernClassEntry) == 3, "EpdKernClassEntry must be 3 bytes to match .cpfont file layout");
 static_assert(sizeof(EpdLigaturePair) == 8, "EpdLigaturePair must be 8 bytes to match .cpfont file layout");
@@ -573,7 +573,7 @@ uint32_t SdCardFont::probeCoverage(const char* path, const uint32_t* codepoints,
 
   uint8_t headerBuf[HEADER_SIZE];
   if (file.read(headerBuf, HEADER_SIZE) != HEADER_SIZE || memcmp(headerBuf, CPFONT_MAGIC, 8) != 0 ||
-      readU16(headerBuf + 8) < CPFONT_MIN_VERSION || readU16(headerBuf + 8) > CPFONT_VERSION) {
+      !isSupportedCpfontVersion(readU16(headerBuf + 8))) {
     file.close();
     return 0;
   }
@@ -647,8 +647,9 @@ bool SdCardFont::load(const char* path) {
   }
 
   uint16_t fileVersion = readU16(headerBuf + 8);
-  if (fileVersion < CPFONT_MIN_VERSION || fileVersion > CPFONT_VERSION) {
-    LOG_ERR("SDCF", "Unsupported version: %u (expected %u..%u)", fileVersion, CPFONT_MIN_VERSION, CPFONT_VERSION);
+  if (!isSupportedCpfontVersion(fileVersion)) {
+    LOG_ERR("SDCF", "Unsupported version: %u (expected %u or %u)", fileVersion, CPFONT_UPSTREAM_VERSION,
+            CPFONT_VERSION);
     return false;
   }
 
@@ -910,7 +911,7 @@ bool SdCardFont::load(const char* path) {
 
   loaded_ = true;
 
-  LOG_DBG("SDCF", "Loaded: %s (v%u, %u styles)", path, CPFONT_VERSION, styleCount_);
+  LOG_DBG("SDCF", "Loaded: %s (%u styles)", path, styleCount_);
   for (uint8_t i = 0; i < MAX_STYLES; i++) {
     if (!styles_[i].present) continue;
     const auto& h = styles_[i].header;

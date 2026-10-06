@@ -153,37 +153,38 @@ constexpr int raiseAboveBase(const Anchor anchor, const int markTop, const int m
 
 /// Font data stored PER GLYPH
 typedef struct {
-  uint8_t width;        ///< Bitmap dimensions in pixels
-  uint8_t height;       ///< Bitmap dimensions in pixels
-  uint16_t advanceX;    ///< Distance to advance cursor (x axis), 12.4 fixed-point in pixels
-  int16_t left;         ///< X dist from cursor pos to UL corner
-  int16_t top;          ///< Y dist from cursor pos to UL corner
-  uint16_t dataLength;  ///< Size of the font data.
-  uint8_t anchorAbove;  ///< Mark attachment x (see glyphAnchor); base: above anchor, mark: value or mode
-  uint8_t anchorBelow;  ///< Base: below anchor, mark: value or mode (see glyphAnchor); 0 = none
+  uint8_t width;             ///< Bitmap dimensions in pixels
+  uint8_t height;            ///< Bitmap dimensions in pixels
+  uint16_t advanceX;         ///< Distance to advance cursor (x axis), 12.4 fixed-point in pixels
+  int16_t left;              ///< X dist from cursor pos to UL corner
+  int16_t top;               ///< Y dist from cursor pos to UL corner
+  uint16_t dataLength;       ///< Size of the font data.
+  uint8_t anchorAbove;       ///< Mark attachment x (see glyphAnchor); base: above anchor, mark: value or mode
+  uint8_t anchorBelow;       ///< Base: below anchor, mark: value or mode (see glyphAnchor); 0 = none
   uint32_t dataOffset : 24;  ///< Offset into EpdFont->bitmap (or within-group offset for compressed fonts)
-  uint32_t anchorExtra : 8;  ///< Base: a third attachment point (.cpfont v6); 0 = none (built-in, v4, v5)
+  uint32_t anchorExtra
+      : 8;  ///< Base: a third attachment point (CrossIndix .cpfont); 0 = none (built-in, upstream files)
 } EpdGlyph;
 
-/// Mark attachment points (.cpfont v5/v6, EpdGlyph::anchorAbove/anchorBelow/
-/// anchorExtra), derived from the font's GPOS mark-to-base positioning by
-/// the SD font builder. A base glyph stores where an above / below mark's
-/// origin goes, as an x offset from the base cursor (v6 adds a third point,
-/// anchorExtra, for the mark the font attaches elsewhere: Tiro Sanskrit's
-/// anusvara, Noto Serif Bengali's ba-phala). A mark glyph stores its own
-/// anchor as an x offset from its origin in the byte of its class
-/// (combiningMark::attachesBelow) and, in v6, a placement mode in the other
-/// byte: which base point the value is measured from. Units are half pixels,
-/// biased by 128 so that 0 means "no anchor" (built-in fonts, v4 files,
-/// glyphs no mark attaches to); then the renderer falls back to the
-/// anchorFor rules. A v5 mark has 0 in its other byte = Mode::CLASS_ANCHOR.
+/// Mark attachment points of the CrossIndix .cpfont format
+/// (EpdGlyph::anchorAbove/anchorBelow/anchorExtra), derived from the font's
+/// GPOS mark-to-base positioning by the SD font builder. A base glyph stores
+/// where an above / below mark's origin goes, as an x offset from the base
+/// cursor, plus a third point, anchorExtra, for the mark the font attaches
+/// elsewhere (Tiro Sanskrit's anusvara, Noto Serif Bengali's ba-phala). A
+/// mark glyph stores its own anchor as an x offset from its origin in the
+/// byte of its class (combiningMark::attachesBelow) and a placement mode in
+/// the other byte: which base point the value is measured from. Units are
+/// half pixels, biased by 128 so that 0 means "no anchor" (built-in fonts,
+/// CrossInk's version 4 files, glyphs no mark attaches to); then the renderer
+/// falls back to the anchorFor rules. A mode byte of 0 is Mode::CLASS_ANCHOR.
 namespace glyphAnchor {
 constexpr uint8_t NONE = 0;
 constexpr int BIAS = 128;
 
 /// Mark placement modes (the byte of the mark's other class).
 enum Mode : uint8_t {
-  CLASS_ANCHOR = 0,  ///< value is measured from the base anchor of the mark's class (v5)
+  CLASS_ANCHOR = 0,  ///< value is measured from the base anchor of the mark's class (the default)
   PEN = 1,           ///< value is measured from the base's advance (nukta, hasanta in Hind Siliguri)
   OTHER_CLASS = 2,   ///< value is measured from the base anchor of the other class (Noto Sans phalas)
   EXTRA = 3,         ///< value is measured from the base's anchorExtra point
