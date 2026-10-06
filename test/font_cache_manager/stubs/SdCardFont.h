@@ -11,6 +11,8 @@ class SdCardFont {
   };
 
   void clearCache() {}
+  void clearCache(size_t, size_t) {}
+  static void readHeap(size_t& freeHeap, size_t& maxAllocHeap) { freeHeap = maxAllocHeap = 0; }
   void releaseForLowMemory(bool preserveAdvanceTable) {
     releaseForLowMemoryCallCount++;
     lastPreserveAdvanceTable = preserveAdvanceTable;

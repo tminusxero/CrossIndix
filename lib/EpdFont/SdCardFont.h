@@ -82,7 +82,17 @@ class SdCardFont {
   // Reset mini data for all styles and restore stub EpdFontData. Page-sized
   // allocations may be retained when heap is healthy; the persistent advance
   // cache is also preserved so repeated layout passes can reuse fetched metrics.
+  // Per-render reset (FontCacheManager::PrewarmScope). The retain-or-free
+  // decision for the mini glyph data reads the heap: pass the figures the
+  // caller measured before its loop so every font of a render decides on the
+  // same numbers. Fonts reset in map order would otherwise see the heap the
+  // earlier fonts just freed, and which fonts keep their data would follow
+  // the font ids (hashes of the file content) rather than the heap.
   void clearCache();
+  void clearCache(size_t freeHeap, size_t maxAllocHeap);
+  // The heap figures clearCache(freeHeap, maxAllocHeap) wants, read once by
+  // the caller (FontCacheManager) for every font of a render.
+  static void readHeap(size_t& freeHeap, size_t& maxAllocHeap);
 
   // Release optional resident caches before memory-heavy work such as EPUB
   // image extraction. Keeps the font loaded and usable, but future layout or
@@ -354,7 +364,7 @@ class SdCardFont {
   // Per-style helpers
   void freeStyleMiniData(PerStyle& s);
   bool ensureBitmapCapacity(PerStyle& s, uint32_t needed);
-  void resetStyleMiniData(PerStyle& s);
+  void resetStyleMiniData(PerStyle& s, size_t freeHeap, size_t maxAllocHeap);
   void freeStyleAll(PerStyle& s);
   void freeStyleKernLigatureData(PerStyle& s);
   void freeStyleMiniKern(PerStyle& s);
