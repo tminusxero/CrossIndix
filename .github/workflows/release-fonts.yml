@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to attach the font folders to (for example v0.1.0-beta)"
+        description: "Release tag to attach the font folders to (for example v0.1.0), or 'fonts' to refresh only the rolling release the devices download from"
         required: true
         type: string
 
@@ -50,6 +50,7 @@ jobs:
           ls flat | wc -l
       - name: Attach to release ${{ inputs.tag }}
         # Zips for people, the individual .cpfont files plus fonts.json for the device.
+        if: inputs.tag != 'fonts'
         run: |
           python3 scripts/generate-font-manifest.py --input dist/flat \
             --base-url "https://github.com/${{ github.repository }}/releases/download/${{ inputs.tag }}/" \
@@ -63,10 +64,9 @@ jobs:
             --base-url "https://github.com/${{ github.repository }}/releases/download/fonts/" \
             --output dist/fonts-rolling.json --descriptions-from lib/EpdFont/scripts/sd-fonts.yaml
           cp dist/fonts-rolling.json dist/rolling/fonts.json 2>/dev/null || { mkdir -p dist/rolling && cp dist/fonts-rolling.json dist/rolling/fonts.json; }
+          NOTES="Current CrossIndix font build (format 128), as the device's Manage Fonts screen downloads it. Built from ${{ github.sha }}. For manual installs use the zips here or on a version release."
           if ! gh release view fonts >/dev/null 2>&1; then
-            gh release create fonts --title "Font folders for Manage Fonts (current)" \
-              --notes "Current CrossIndix font build, as the device's Manage Fonts screen downloads it. Refreshed from release ${{ inputs.tag }}. For manual installs use the zips on that release." \
-              --target "${{ github.sha }}"
+            gh release create fonts --title "Font folders for Manage Fonts (current)" --notes "$NOTES" --target "${{ github.sha }}"
           fi
-          gh release upload fonts dist/flat/*.cpfont dist/rolling/fonts.json dist/*.zip --clobber
-          gh release edit fonts --notes "Current CrossIndix font build, as the device's Manage Fonts screen downloads it. Refreshed from release ${{ inputs.tag }}. For manual installs use the zips on that release."
+          gh release upload fonts dist/flat/*.cpfont dist/rolling/fonts.json dist/*.zip dist/SHA256SUMS-fonts.txt --clobber
+          gh release edit fonts --notes "$NOTES"
