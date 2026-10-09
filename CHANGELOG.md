@@ -1,4 +1,6 @@
-## [Unreleased]
+## [v0.1.0-rc1] - 2026-10-09
+
+Release candidate for 0.1.0, built by GitHub Actions. Everything below is new since CrossInk v1.6.0; the 0.1.0-beta release carried the first three groups (shaping, UI text fallback, the parser fix) without updates or font downloads.
 
 ### Added
 

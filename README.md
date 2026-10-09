@@ -34,7 +34,7 @@ script). Other Indian scripts are not supported yet; see [Other scripts](#other-
    - On the device, with Wi-Fi: Settings > Reader > Font Options > Download Fonts, pick a family,
      and the folder is installed for you. The list is CrossInk's own font catalog with the
      CrossIndix families added, so Latin, Greek and Cyrillic fonts are there too. (From version
-     0.1.0; on 0.1.0-beta use the next way.)
+     0.1.0-rc1; on 0.1.0-beta use the next way.)
    - By hand: download a family's zip from the same Releases page, unzip it, and copy the whole
      folder into the hidden `.fonts` folder on the SD card:
 
@@ -62,7 +62,7 @@ that script is on the card, whichever font you read with.
 ## Updates
 
 Settings > System > Check for Updates looks at this project's releases and installs the image for
-your device over Wi-Fi after verifying its checksum (from version 0.1.0; 0.1.0-beta devices are
+your device over Wi-Fi after verifying its checksum (from version 0.1.0-rc1; 0.1.0-beta devices are
 offered 0.1.0 by the same screen). Font folders already on the card keep working across updates.
 
 ## What to expect

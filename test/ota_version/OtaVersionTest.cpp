@@ -32,6 +32,8 @@ TEST(OtaVersion, ReleaseIsNewerThanItsBeta) {
   EXPECT_LT(compare("v0.1.0-beta", "0.1.0"), 0);
   EXPECT_EQ(compare("v0.1.0-beta", "0.1.0-beta"), 0);
   EXPECT_EQ(compare("v0.1.0-beta2", "0.1.0-beta"), 0);  // same number, both prereleases: tie
+  EXPECT_EQ(compare("v0.1.0-rc1", "0.1.0-beta"), 0);    // rc and beta of one number: tie
+  EXPECT_GT(compare("v0.1.0", "0.1.0-rc1"), 0);         // the release beats its rc
 }
 
 TEST(OtaVersion, NumbersDecideFirst) {
